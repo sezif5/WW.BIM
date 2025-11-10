@@ -1,0 +1,6 @@
+title: "Позиция"
+tooltip: "Построчная нумерация ADSK_Позиция; поддержка выбора"
+author: "Nik"
+context: doc-project
+assembly: ADSKPositioner.dll
+command: ADSKPositioner.FillPositionCommand

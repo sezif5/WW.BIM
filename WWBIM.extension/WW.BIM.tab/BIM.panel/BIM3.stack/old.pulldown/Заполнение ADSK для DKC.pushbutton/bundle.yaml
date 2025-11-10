@@ -1,0 +1,17 @@
+title:
+  ru: "ADSK\nдля DKC"
+  en_us: "ADSK\nfor DKC"
+
+tooltip:
+  ru: >- 
+    Копирует значение параметров DKC в параметры ADSK для сводной спецификации
+  en_us: >-
+    Копирует значение параметров DKC в параметры ADSK для сводной спецификации
+
+assembly: RevitValueModifier.dll
+command_class: RevitValueModifierCommand
+
+author: Мдфв
+
+min_revit_version: 2022
+max_revit_version: 2024

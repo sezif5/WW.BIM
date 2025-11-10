@@ -1,0 +1,17 @@
+title:
+  ru: "Видимость\nКубиков"
+  en_us: "Export\nlookup tables"
+
+tooltip:
+  ru: >-
+    Заполняет Видимость_верх и Видимость_низ у семейств обобщённой модели (при наличии параметров).
+  en_us: >-
+    Exports lookup tables to Excel (.csv).
+    
+    This command solves problem with encoding russian symbols.
+
+author: dosymep
+help_url: "https://kb.a101.ru/pages/viewpage.action?pageId=67830008"
+
+min_revit_version: 2020
+max_revit_version: 2024

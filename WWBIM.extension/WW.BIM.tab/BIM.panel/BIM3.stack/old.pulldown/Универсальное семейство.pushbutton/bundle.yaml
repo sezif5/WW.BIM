@@ -1,0 +1,16 @@
+title:
+  ru: "Универсальные \nСемейства"
+  en_us: "Export\nlookup tables"
+
+tooltip:
+  ru: >-
+    Заполняет ADSK_Наименование, Марку и Код изделия по маске в параметрах типа
+  en_us: >-
+    E
+    
+    
+
+author: 
+help_url: 
+min_revit_version: 2020
+max_revit_version: 2024

@@ -1,0 +1,17 @@
+title:
+  ru: "Копирование" 
+  en_us: "Copy"
+
+tooltip:
+  ru: >-
+    Копирование значения из одного параметра в другой. Обрабатывает элементы на активном виде.
+  en_us: >-
+    Test
+    
+    
+
+author: Vlad
+help_url: "Error"
+
+min_revit_version: 2020
+max_revit_version: 2024

@@ -1,0 +1,14 @@
+title:
+  ru: "Импорт\nрасчетов"
+  en_us: "Calculation\nimport"
+
+tooltip:
+  ru: Импортирует расчеты из аудитора в модель RVT на базе которой была выполнена АР.
+  en_us: Imports calculations from the auditor into RVT model on the basis of which the AR was performed.
+
+author: Redomine/Kuprina
+help_url: "https://kb.a101.ru/pages/viewpage.action?pageId=157126880"
+
+min_revit_version: 2022
+max_revit_version: 2024
+

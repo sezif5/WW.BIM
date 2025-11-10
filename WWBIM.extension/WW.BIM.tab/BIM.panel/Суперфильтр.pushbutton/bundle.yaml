@@ -1,0 +1,20 @@
+title:
+  ru: Суперфильтр
+  en_us: Superfilter
+
+tooltip:
+  ru: >-
+    Фильтрует элементы в проекте на основе значений параметров.
+
+    Фильтрация элементов по параметрам работает по принципу "ИЛИ".
+  en_us: >-
+    Selects elements in the project based on parameter values.
+
+    Filtering elements by parameters works according to the "OR" principle.
+
+
+author: dosymep
+help_url: "https://kb.a101.ru/pages/viewpage.action?pageId=67829991"
+
+min_revit_version: 2020
+max_revit_version: 2024

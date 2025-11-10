@@ -1,0 +1,26 @@
+title:
+  ru: Нумерация
+  en_us: Numerate
+
+tooltip:
+  ru: Заполнение позиции в спецификации.
+    
+    1. Откройте вид спецификации, на котором требуется заполнить нумерацию.
+
+    2. Запустите команду.
+
+    3. Проверьте результат работы. Параметры типа заполнены не будут!
+
+  en_us: Filling out a position in the specification.
+  
+    1. Open the specification view where you want to fill in the numbering.
+  
+    2. Run the command.
+  
+    3. Check the result of the work. The type parameters will not be filled in!
+
+author: Redomine
+help_url: "https://kb.a101.ru/pages/viewpage.action?pageId=110562607"
+
+min_revit_version: 2020
+max_revit_version: 2024

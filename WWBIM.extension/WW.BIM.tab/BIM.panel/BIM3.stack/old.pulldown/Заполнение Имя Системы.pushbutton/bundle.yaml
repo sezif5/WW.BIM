@@ -1,0 +1,19 @@
+title:
+  ru: "Имя \nСистемы"
+  en_us: "Export\nlookup tables"
+
+tooltip:
+  ru: >-
+    Имя системы (первое слово) или Сокращение для системы (все, без дублей) -> целевой параметр. "
+              "Вложенные элементы наследуют значение РОДИТЕЛЯ. Корневой обход от SuperComponent=None. "
+              "Коннекторы читаются только у Механического оборудования. Shift-клик — задать имя параметра.   
+  en_us: >-
+    Exports lookup tables to Excel (.csv).
+    
+    This command solves problem with encoding russian symbols.
+
+author: dosymep
+help_url: "https://kb.a101.ru/pages/viewpage.action?pageId=67830008"
+
+min_revit_version: 2020
+max_revit_version: 2024

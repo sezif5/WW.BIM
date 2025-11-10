@@ -1,0 +1,18 @@
+title:
+  ru: "Анализ отчёта"
+  en_us: "Conflicts"
+
+tooltip:
+  ru: >-
+    Визуализация XML отчета из Navisworks
+        .
+  en_us: >-
+    Test
+    
+    
+
+author: Vlad
+help_url: "Error"
+
+min_revit_version: 2020
+max_revit_version: 2024

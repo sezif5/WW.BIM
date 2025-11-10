@@ -1,0 +1,6 @@
+title: "Комплект\nпо листам"
+tooltip: "Копирует 'ADSK_Раздел проекта' листа в 'ADSK_Комплект чертежей' элементов спецификаций или других видов, размещённых на листе."
+author: "Vlad"
+context: doc-project
+assembly: ADSKSectionToSet.dll
+command: ADSKSectionToSet.ExternalCommand
