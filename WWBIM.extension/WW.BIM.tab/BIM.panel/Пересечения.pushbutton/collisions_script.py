@@ -1,538 +1,879 @@
 # -*- coding: utf-8 -*-
-__title__  = u"Пересечения"
+"""
+Скрипт для чтения и анализа XML-отчётов Navisworks о пересечениях.
+
+Показывает все проверки (включая пустые), фильтрует по текущей модели Revit,
+печатает таблицы с подсветкой категорий и выводит сводку.
+"""
+
+__title__ = u"Пересечения"
 __author__ = u"vlad / you"
-__doc__    = u"Читает XML-отчёт Navisworks (в т.ч. «Все тесты…»), показывает все проверки (даже пустые), фильтрует по текущей модели Revit, печатает таблицы с подсветкой категории, выводит сводку и дату отчёта."
+__doc__ = u"Читает XML-отчёт Navisworks, показывает проверки, фильтрует по текущей модели Revit, выводит таблицы с подсветкой категории и сводку."
 
 import os
 import re
+from collections import namedtuple
 from datetime import datetime
+
 from pyrevit import forms, script
 from Autodesk.Revit.DB import ElementId
 
-# -------- Настройки доп. фильтрации --------
-FILTER_BY_FILE     = True   # сверка файла из pathlink с текущей моделью
-FILTER_BY_CATEGORY = False  # при необходимости дополнительно сверять категорию в тексте pathlink
 
-# ---------- UI ----------
+# =============================================================================
+# КОНСТАНТЫ И НАСТРОЙКИ
+# =============================================================================
+
+# Фильтрация результатов
+FILTER_BY_FILE = True       # Сверка файла из pathlink с текущей моделью
+FILTER_BY_CATEGORY = False  # Дополнительная сверка категории в тексте pathlink
+
+# Имена атрибутов для поиска ID объекта
+OBJECT_ID_NAMES = frozenset([
+    'объект id', 'object id', 'object 1 id',
+    'object 2 id', 'id объекта'
+])
+
+# Атрибуты даты в XML
+DATE_ATTRIBUTES = (
+    'date', 'created', 'generated', 'exported', 'timestamp',
+    'time', 'start', 'lastsaved', 'creationtime', 'modificationtime'
+)
+
+# CSS-стиль для подсветки категорий
+BADGE_STYLE = u'background:#2f3b4a; color:#fff; padding:1px 6px; border-radius:3px; font-weight:600;'
+
+
+# =============================================================================
+# РЕГУЛЯРНЫЕ ВЫРАЖЕНИЯ
+# =============================================================================
+
+class Patterns:
+    """Скомпилированные регулярные выражения для парсинга."""
+
+    # Экранирование некорректных амперсандов в XML
+    BAD_AMPERSAND = re.compile(
+        u'&(?!amp;|lt;|gt;|apos;|quot;|#\\d+;|#x[0-9A-Fa-f]+;)',
+        re.UNICODE
+    )
+
+    # Имя файла модели
+    MODEL_FILE = re.compile(u'.+\\.(nwc|nwd|nwf|rvt)$', re.IGNORECASE)
+
+    # Атрибут даты в XML-тексте
+    DATE_ATTR = re.compile(
+        r'\b(?:date|created|generated|export(?:date|ed)?|timestamp|time|'
+        r'start|lastsaved|creationtime|modificationtime)\s*=\s*"([^"]+)"',
+        re.IGNORECASE
+    )
+
+    # Fallback-парсер: блоки и атрибуты
+    CLASHTEST_BLOCK = re.compile(r'<clashtest\b[^>]*>.*?</clashtest>', re.DOTALL | re.IGNORECASE)
+    TEST_BLOCK = re.compile(r'<test\b[^>]*>.*?</test>', re.DOTALL | re.IGNORECASE)
+    CLASHRESULT_BLOCK = re.compile(r'<clashresult\b[^>]*>.*?</clashresult>', re.DOTALL | re.IGNORECASE)
+    CLASHOBJECT_BLOCK = re.compile(r'<clashobject\b[^>]*>.*?</clashobject>', re.DOTALL | re.IGNORECASE)
+
+    ATTR_NAME = re.compile(r'\bname=\"([^\"]+)\"', re.IGNORECASE)
+    ATTR_TESTNAME = re.compile(r'\btestname=\"([^\"]+)\"', re.IGNORECASE)
+    ATTR_HREF = re.compile(r'\bhref=\"([^\"]*)\"', re.IGNORECASE)
+
+    SMARTTAG_PAIR = re.compile(
+        r'<smarttag>.*?<name>(.*?)</name>.*?<value>(.*?)</value>.*?</smarttag>',
+        re.DOTALL | re.IGNORECASE
+    )
+    OBJECTATTR_PAIR = re.compile(
+        r'<objectattribute>.*?<name>(.*?)</name>.*?<value>(.*?)</value>.*?</objectattribute>',
+        re.DOTALL | re.IGNORECASE
+    )
+    PATHLINK_BLOCK = re.compile(r'<pathlink>.*?</pathlink>', re.DOTALL | re.IGNORECASE)
+    NODE_TEXT = re.compile(r'<node>(.*?)</node>', re.DOTALL | re.IGNORECASE)
+    HTML_TAGS = re.compile(r'<[^>]+>')
+
+
+# =============================================================================
+# СТРУКТУРЫ ДАННЫХ
+# =============================================================================
+
+ClashObject = namedtuple('ClashObject', ['element_id', 'path'])
+ClashRow = namedtuple('ClashRow', [
+    'name', 'image_path', 'element_id', 'other_element_id',
+    'path', 'other_path', 'category', 'other_category'
+])
+
+
+# =============================================================================
+# ИНИЦИАЛИЗАЦИЯ REVIT
+# =============================================================================
+
 out = script.get_output()
 out.close_others(all_open_outputs=True)
 out.set_width(1200)
 
 uidoc = __revit__.ActiveUIDocument
-doc   = uidoc.Document
+doc = uidoc.Document
 
-# ---------- Вспомогательное ----------
-_EL_CACHE = {}   # id (int) -> (element_or_None, category_name_or_u"")
 
-def _get_el_and_cat(eid_int):
-    if eid_int in _EL_CACHE:
-        return _EL_CACHE[eid_int]
-    try:
-        el = doc.GetElement(ElementId(eid_int))
-        cat = (el.Category.Name if el and el.Category else u"") or u""
-    except Exception:
-        el, cat = None, u""
-    _EL_CACHE[eid_int] = (el, cat)
-    return el, cat
+# =============================================================================
+# КЭШ ЭЛЕМЕНТОВ И КАТЕГОРИЙ
+# =============================================================================
 
-def _norm_key(s):
-    if not s:
-        return u""
-    return re.sub(u'[^0-9a-zA-Zа-яА-Я]+', u'', s, flags=re.UNICODE).lower()
+class ElementCache:
+    """Кэш для элементов Revit и их категорий."""
 
-DOC_TITLE_KEY = _norm_key(doc.Title)
+    def __init__(self, document):
+        self._doc = document
+        self._cache = {}
+        self._category_keys = self._build_category_keys()
+        self._doc_title_key = self._normalize_key(document.Title)
 
-# Соберём перечень всех категорий из документа (для подсветки по тексту пути)
-_DOC_CAT_KEYS = set()
-try:
-    for c in doc.Settings.Categories:
+    def _normalize_key(self, text):
+        """Нормализует строку для сравнения."""
+        if not text:
+            return u""
+        return re.sub(u'[^0-9a-zA-Zа-яА-Я]+', u'', text, flags=re.UNICODE).lower()
+
+    def _build_category_keys(self):
+        """Собирает нормализованные имена категорий документа."""
+        keys = set()
         try:
-            nm = c.Name
-            if nm:
-                _DOC_CAT_KEYS.add(_norm_key(nm))
+            for cat in self._doc.Settings.Categories:
+                try:
+                    if cat.Name:
+                        keys.add(self._normalize_key(cat.Name))
+                except Exception:
+                    pass
         except Exception:
             pass
-except Exception:
-    pass
+        return keys
 
-# ---------- XML backend ----------
-try:
-    from lxml import etree as ET
-except Exception:
-    import xml.etree.ElementTree as ET
+    def get_element_and_category(self, element_id):
+        """Возвращает (element, category_name) для заданного ID."""
+        if element_id in self._cache:
+            return self._cache[element_id]
 
-# =================== устойчивое чтение XML ===================
-
-_BAD_AMP_RE = re.compile(u'&(?!amp;|lt;|gt;|apos;|quot;|#\\d+;|#x[0-9A-Fa-f]+;)', re.UNICODE)
-
-def _read_text_guess_enc(path):
-    with open(path, 'rb') as f:
-        data = f.read()
-    for enc in ('utf-8-sig', 'utf-16', 'utf-8', 'cp1251'):
         try:
-            return data.decode(enc)
+            element = self._doc.GetElement(ElementId(element_id))
+            category = u""
+            if element and element.Category:
+                category = element.Category.Name or u""
         except Exception:
-            pass
-    return data.decode('utf-8', 'ignore')
+            element, category = None, u""
 
-def _strip_invalid_xml_chars(s):
-    out_chars = []
-    for ch in s:
-        c = ord(ch)
-        if (c == 0x9 or c == 0xA or c == 0xD or
-            (0x20 <= c <= 0xD7FF) or
-            (0xE000 <= c <= 0xFFFD) or
-            (0x10000 <= c <= 0x10FFFF)):
-            out_chars.append(ch)
+        self._cache[element_id] = (element, category)
+        return element, category
+
+    def matches_current_model(self, path_text):
+        """Проверяет, относится ли путь к текущей модели."""
+        filename = self._extract_filename(path_text)
+        if not filename:
+            return True
+
+        filename_key = self._normalize_key(filename)
+        return filename_key in self._doc_title_key or self._doc_title_key in filename_key
+
+    def _extract_filename(self, path_text):
+        """Извлекает имя файла модели из пути."""
+        if not path_text:
+            return u''
+
+        for token in path_text.split(u'/'):
+            token = token.strip()
+            if Patterns.MODEL_FILE.match(token):
+                return os.path.splitext(token)[0]
+        return u''
+
+    def find_category_in_path(self, segment_normalized):
+        """Ищет категорию документа в сегменте пути."""
+        if not segment_normalized or len(segment_normalized) < 4:
+            return None
+
+        for cat_key in self._category_keys:
+            if not cat_key or len(cat_key) < 4:
+                continue
+            if cat_key in segment_normalized or segment_normalized in cat_key:
+                return cat_key
+        return None
+
+    @property
+    def doc_title_key(self):
+        return self._doc_title_key
+
+    def normalize_key(self, text):
+        return self._normalize_key(text)
+
+
+# Глобальный экземпляр кэша
+element_cache = ElementCache(doc)
+
+
+# =============================================================================
+# ЧТЕНИЕ И ОЧИСТКА XML
+# =============================================================================
+
+class XmlReader:
+    """Класс для безопасного чтения XML-файлов."""
+
+    ENCODINGS = ('utf-8-sig', 'utf-16', 'utf-8', 'cp1251')
+
+    @classmethod
+    def read_file(cls, path):
+        """Читает файл с автоопределением кодировки."""
+        with open(path, 'rb') as f:
+            data = f.read()
+
+        for encoding in cls.ENCODINGS:
+            try:
+                return data.decode(encoding)
+            except Exception:
+                pass
+        return data.decode('utf-8', 'ignore')
+
+    @classmethod
+    def sanitize(cls, text):
+        """Очищает текст от некорректных XML-символов."""
+        # Нормализация переносов строк
+        text = text.replace(u'\r\n', u'\n').replace(u'\r', u'\n')
+        text = text.replace(u'\ufeff', u' ')
+
+        # Удаление недопустимых символов
+        text = cls._strip_invalid_chars(text)
+
+        # Экранирование амперсандов
+        text = Patterns.BAD_AMPERSAND.sub(u'&amp;', text)
+
+        # Обрезка до начала XML
+        start = text.find(u'<')
+        if start > 0:
+            text = text[start:]
+
+        return text
+
+    @staticmethod
+    def _strip_invalid_chars(text):
+        """Удаляет недопустимые XML-символы."""
+        result = []
+        for char in text:
+            code = ord(char)
+            if (code == 0x9 or code == 0xA or code == 0xD or
+                (0x20 <= code <= 0xD7FF) or
+                (0xE000 <= code <= 0xFFFD) or
+                (0x10000 <= code <= 0x10FFFF)):
+                result.append(char)
+            else:
+                result.append(u' ')
+        return u''.join(result)
+
+    @classmethod
+    def parse(cls, xml_path):
+        """Парсит XML-файл и возвращает корневой элемент."""
+        try:
+            from lxml import etree as ET
+        except ImportError:
+            import xml.etree.ElementTree as ET
+
+        raw_text = cls.read_file(xml_path)
+        cleaned_text = cls.sanitize(raw_text)
+        return ET.fromstring(cleaned_text)
+
+
+# =============================================================================
+# ПАРСИНГ XML-ОТЧЁТА
+# =============================================================================
+
+class NavisworksReportParser:
+    """Парсер XML-отчётов Navisworks."""
+
+    def __init__(self, xml_path):
+        self.xml_path = xml_path
+        self.base_dir = os.path.dirname(xml_path)
+
+    def parse(self):
+        """Парсит отчёт и возвращает dict: test_name -> [ClashRow, ...]."""
+        try:
+            return self._parse_with_xml_parser()
+        except Exception as e:
+            out.print_md(u":warning: XML-парсер не справился (`{}`). Использую fallback...".format(e))
+            return self._parse_with_regex()
+
+    def _parse_with_xml_parser(self):
+        """Основной парсер на базе XML."""
+        root = XmlReader.parse(self.xml_path)
+
+        # Собираем имена всех тестов
+        test_names = self._collect_test_names(root)
+        groups = {name: [] for name in test_names}
+
+        # Строим карту родительских элементов
+        parent_map = self._build_parent_map(root)
+
+        # Парсим результаты
+        for clash_result in root.findall('.//clashresult'):
+            self._process_clash_result(clash_result, groups, parent_map)
+
+        return groups
+
+    def _collect_test_names(self, root):
+        """Собирает имена всех тестов."""
+        names = set()
+        for tag in ('clashtest', 'test'):
+            for element in root.findall('.//{}'.format(tag)):
+                name = element.get('name') or element.get('displayname')
+                if name:
+                    names.add(name)
+        return names
+
+    def _build_parent_map(self, root):
+        """Строит карту ребёнок -> родитель."""
+        parent_map = {}
+        for parent in root.iter():
+            for child in list(parent):
+                parent_map[child] = parent
+        return parent_map
+
+    def _process_clash_result(self, clash_result, groups, parent_map):
+        """Обрабатывает один clashresult."""
+        test_name = self._get_test_name(clash_result, parent_map)
+        clash_name = clash_result.get('name') or u'Без имени'
+        image_path = self._resolve_image_path(clash_result.get('href'))
+
+        objects = []
+        for clash_object in clash_result.findall('./clashobjects/clashobject'):
+            obj = self._parse_clash_object(clash_object)
+            if obj:
+                objects.append(obj)
+
+        if not objects:
+            return
+
+        rows = groups.setdefault(test_name, [])
+        self._add_rows(rows, clash_name, image_path, objects)
+
+    def _get_test_name(self, clash_result, parent_map):
+        """Определяет имя теста для clashresult."""
+        # Сначала ищем в атрибутах самого элемента
+        for attr in ('testname', 'test', 'groupname'):
+            name = clash_result.get(attr)
+            if name:
+                return name
+
+        # Ищем в родительских элементах
+        parent = parent_map.get(clash_result)
+        while parent is not None:
+            name = parent.get('name') or parent.get('displayname') or parent.get('testname')
+            if name:
+                return name
+            parent = parent_map.get(parent)
+
+        return u'(Без названия проверки)'
+
+    def _parse_clash_object(self, element):
+        """Парсит clashobject и возвращает ClashObject."""
+        element_id = self._extract_object_id(element)
+        if element_id is None:
+            return None
+
+        path = self._extract_pathlink(element)
+        return ClashObject(element_id=element_id, path=path)
+
+    def _extract_object_id(self, element):
+        """Извлекает ID объекта из smarttags или objectattribute."""
+        # Ищем в smarttags
+        for smarttag in element.findall('./smarttags/smarttag'):
+            name = (smarttag.findtext('name') or '').strip().lower()
+            if name in OBJECT_ID_NAMES:
+                value = (smarttag.findtext('value') or '').strip()
+                if value.isdigit():
+                    return int(value)
+
+        # Ищем в objectattribute
+        for obj_attr in element.findall('./objectattribute'):
+            name = (obj_attr.findtext('name') or '').strip().lower()
+            if name in OBJECT_ID_NAMES:
+                value = (obj_attr.findtext('value') or '').strip()
+                if value.isdigit():
+                    return int(value)
+
+        return None
+
+    def _extract_pathlink(self, element):
+        """Извлекает путь из pathlink."""
+        parts = []
+
+        # Пробуем node
+        for node in element.findall('./pathlink/node'):
+            text = (node.text or '').strip()
+            if text:
+                parts.append(text)
+
+        # Если не нашли, пробуем path
+        if not parts:
+            for path in element.findall('./pathlink/path'):
+                text = (path.text or '').strip()
+                if text:
+                    parts.append(text)
+
+        return u' / '.join(parts)
+
+    def _resolve_image_path(self, href):
+        """Преобразует относительный путь к изображению в абсолютный."""
+        if not href:
+            return u''
+        href = href.replace('\\', '/').lstrip('./')
+        return os.path.normpath(os.path.join(self.base_dir, href))
+
+    def _add_rows(self, rows, clash_name, image_path, objects):
+        """Добавляет строки для пары объектов."""
+        if len(objects) >= 2:
+            obj_a, obj_b = objects[0], objects[1]
+            # Добавляем обе перестановки
+            rows.append({
+                'name': clash_name, 'img': image_path,
+                'id': obj_a.element_id, 'id_other': obj_b.element_id,
+                'path': obj_a.path, 'path_other': obj_b.path
+            })
+            rows.append({
+                'name': clash_name, 'img': image_path,
+                'id': obj_b.element_id, 'id_other': obj_a.element_id,
+                'path': obj_b.path, 'path_other': obj_a.path
+            })
         else:
-            out_chars.append(u' ')
-    return u''.join(out_chars)
+            obj = objects[0]
+            rows.append({
+                'name': clash_name, 'img': image_path,
+                'id': obj.element_id, 'id_other': None,
+                'path': obj.path, 'path_other': u''
+            })
 
-def _sanitize_xml_text(s):
-    s = s.replace(u'\r\n', u'\n').replace(u'\r', u'\n')
-    s = s.replace(u'\ufeff', u' ')
-    s = _strip_invalid_xml_chars(s)
-    s = _BAD_AMP_RE.sub(u'&amp;', s)
-    p = s.find(u'<')
-    if p > 0:
-        s = s[p:]
-    return s
+    def _parse_with_regex(self):
+        """Fallback-парсер на базе регулярных выражений."""
+        text = XmlReader.sanitize(XmlReader.read_file(self.xml_path))
+        groups = {}
 
-def _safe_xml_root(xml_path):
-    raw = _read_text_guess_enc(xml_path)
-    cleaned = _sanitize_xml_text(raw)
-    return ET.fromstring(cleaned)
+        # Ищем блоки тестов
+        blocks = list(Patterns.CLASHTEST_BLOCK.finditer(text))
+        if not blocks:
+            blocks = list(Patterns.TEST_BLOCK.finditer(text))
+        if not blocks:
+            # Обрабатываем весь текст как один блок
+            blocks = [type('FakeMatch', (), {'group': lambda self, n=0: text})()]
 
-# =================== общее ===================
+        for block_match in blocks:
+            block_text = block_match.group(0) if hasattr(block_match, 'group') else str(block_match)
 
-def _img_abs_from_href(base_dir, href_rel):
-    if not href_rel:
-        return u''
-    href_rel = (href_rel or u'').replace('\\', '/').lstrip('./')
-    return os.path.normpath(os.path.join(base_dir, href_rel))
+            # Определяем имя теста
+            name_match = Patterns.ATTR_NAME.search(block_text)
+            default_test_name = name_match.group(1) if name_match else u'(Без названия проверки)'
+            groups.setdefault(default_test_name, [])
 
-def _pathlink_string_from_element(co):
-    parts = []
-    for node in co.findall('./pathlink/node'):
-        t = (node.text or '').strip()
-        if t:
-            parts.append(t)
-    if not parts:
-        for node in co.findall('./pathlink/path'):
-            t = (node.text or '').strip()
-            if t:
-                parts.append(t)
-    return u' / '.join(parts)
+            # Парсим результаты
+            for result_match in Patterns.CLASHRESULT_BLOCK.finditer(block_text):
+                self._process_regex_result(result_match.group(0), groups, default_test_name)
 
-def _object_id_from_element(co):
-    for st in co.findall('./smarttags/smarttag'):
-        name = (st.findtext('name') or '').strip().lower()
-        if name in ('объект id', 'object id', 'object 1 id', 'object 2 id', 'id объекта'):
-            val = (st.findtext('value') or '').strip()
-            if val.isdigit():
-                return int(val)
-    for oa in co.findall('./objectattribute'):
-        name = (oa.findtext('name') or '').strip().lower()
-        if name in ('id объекта', 'object id', 'объект id'):
-            val = (oa.findtext('value') or '').strip()
-            if val.isdigit():
-                return int(val)
-    return None
+        return groups
 
-_FILE_RX = re.compile(u'.+\\.(nwc|nwd|nwf|rvt)$', re.IGNORECASE)
-def _path_first_filename(path_text):
-    if not path_text:
-        return u''
-    tokens = [t.strip() for t in path_text.split(u'/')]
-    for t in tokens:
-        t = t.strip()
-        if _FILE_RX.match(t):
-            return os.path.splitext(t)[0]
-    return u''
+    def _process_regex_result(self, result_text, groups, default_test_name):
+        """Обрабатывает clashresult через regex."""
+        # Имя теста
+        testname_match = Patterns.ATTR_TESTNAME.search(result_text)
+        test_name = testname_match.group(1) if testname_match else default_test_name
 
-def _filename_matches_current_model(path_text):
-    base = _path_first_filename(path_text)
-    if not base:
-        return True
-    return _norm_key(base) in DOC_TITLE_KEY or DOC_TITLE_KEY in _norm_key(base)
+        # Путь к изображению
+        href_match = Patterns.ATTR_HREF.search(result_text)
+        image_path = self._resolve_image_path(href_match.group(1) if href_match else u'')
 
-# ========= извлечение даты отчёта =========
+        # Имя коллизии
+        name_match = Patterns.ATTR_NAME.search(result_text)
+        clash_name = name_match.group(1) if name_match else u'Без имени'
 
-_DATE_ATTRS = ('date','created','generated','exported','timestamp','time','start','lastsaved','creationtime','modificationtime')
-_RX_DATE_ATTR = re.compile(r'\b(?:date|created|generated|export(?:date|ed)?|timestamp|time|start|lastsaved|creationtime|modificationtime)\s*=\s*"([^"]+)"', re.IGNORECASE)
+        # Парсим объекты
+        objects = []
+        for obj_match in Patterns.CLASHOBJECT_BLOCK.finditer(result_text):
+            obj = self._parse_regex_object(obj_match.group(0))
+            if obj:
+                objects.append(obj)
 
-def _extract_report_datetime(xml_path):
+        if not objects:
+            return
+
+        rows = groups.setdefault(test_name, [])
+        self._add_rows(rows, clash_name, image_path, objects)
+
+    def _parse_regex_object(self, obj_text):
+        """Парсит clashobject через regex."""
+        element_id = None
+
+        # Ищем в smarttags
+        for name, value in Patterns.SMARTTAG_PAIR.findall(obj_text):
+            if (name or u'').strip().lower() in OBJECT_ID_NAMES:
+                v = (value or u'').strip()
+                if v.isdigit():
+                    element_id = int(v)
+                    break
+
+        # Ищем в objectattribute
+        if element_id is None:
+            for name, value in Patterns.OBJECTATTR_PAIR.findall(obj_text):
+                if (name or u'').strip().lower() in OBJECT_ID_NAMES:
+                    v = (value or u'').strip()
+                    if v.isdigit():
+                        element_id = int(v)
+                        break
+
+        if element_id is None:
+            return None
+
+        # Извлекаем путь
+        path = u''
+        pathlink_match = Patterns.PATHLINK_BLOCK.search(obj_text)
+        if pathlink_match:
+            nodes = Patterns.NODE_TEXT.findall(pathlink_match.group(0))
+            parts = [Patterns.HTML_TAGS.sub(u'', n).strip() for n in nodes if n.strip()]
+            path = u' / '.join(parts)
+
+        return ClashObject(element_id=element_id, path=path)
+
+
+# =============================================================================
+# ИЗВЛЕЧЕНИЕ ДАТЫ ОТЧЁТА
+# =============================================================================
+
+def extract_report_datetime(xml_path):
+    """Извлекает дату отчёта из XML или метаданных файла."""
+    # Пробуем из XML-атрибутов
     try:
-        root = _safe_xml_root(xml_path)
-        for a in _DATE_ATTRS:
-            v = root.get(a)
-            if v:
-                return v, u"из XML"
-        for tag in ('report','batchtest','tests'):
-            for el in root.findall('.//{}'.format(tag)):
-                for a in _DATE_ATTRS:
-                    v = el.get(a)
-                    if v:
-                        return v, u"из XML"
+        root = XmlReader.parse(xml_path)
+
+        # Ищем в корневом элементе
+        for attr in DATE_ATTRIBUTES:
+            value = root.get(attr)
+            if value:
+                return value, u"из XML"
+
+        # Ищем в дочерних элементах
+        for tag in ('report', 'batchtest', 'tests'):
+            for element in root.findall('.//{}'.format(tag)):
+                for attr in DATE_ATTRIBUTES:
+                    value = element.get(attr)
+                    if value:
+                        return value, u"из XML"
     except Exception:
         pass
+
+    # Пробуем regex-поиск
     try:
-        txt = _sanitize_xml_text(_read_text_guess_enc(xml_path))
-        m = _RX_DATE_ATTR.search(txt)
-        if m:
-            return m.group(1).strip(), u"из XML"
+        text = XmlReader.sanitize(XmlReader.read_file(xml_path))
+        match = Patterns.DATE_ATTR.search(text)
+        if match:
+            return match.group(1).strip(), u"из XML"
     except Exception:
         pass
+
+    # Берём дату изменения файла
     try:
-        ts = os.path.getmtime(xml_path)
-        dt = datetime.fromtimestamp(ts)
+        timestamp = os.path.getmtime(xml_path)
+        dt = datetime.fromtimestamp(timestamp)
         return dt.strftime(u"%d.%m.%Y %H:%M"), u"по дате изменения файла"
     except Exception:
         return u"", u""
 
-# =================== нормальный парсер: группировка по проверкам ===================
 
-def _parse_groups_normal(xml_path):
-    """
-    Возвращает dict: test_name -> [rows];
-    row = {'name','img','id','id_other','path','path_other'}.
-    Включает тесты без конфликтов (пустые списки).
-    """
-    root = _safe_xml_root(xml_path)
-    base_dir = os.path.dirname(xml_path)
+# =============================================================================
+# ФИЛЬТРАЦИЯ И АННОТАЦИЯ
+# =============================================================================
 
-    # Все названия проверок
-    all_tests = set()
-    for ct in root.findall('.//clashtest'):
-        nm = ct.get('name') or ct.get('displayname')
-        if nm:
-            all_tests.add(nm)
-    for t in root.findall('.//test'):
-        nm = t.get('name') or t.get('displayname')
-        if nm:
-            all_tests.add(nm)
+class ResultFilter:
+    """Фильтрация и аннотация результатов."""
 
-    groups = {nm: [] for nm in all_tests}
+    def __init__(self, cache):
+        self.cache = cache
 
-    # карта ребёнок->родитель
-    parent = {}
-    for p in root.iter():
-        for ch in list(p):
-            parent[ch] = p
+    def filter_and_annotate(self, items):
+        """Фильтрует строки и добавляет информацию о категориях."""
+        result = []
 
-    def _test_name_for_cr(cr):
-        tn = cr.get('testname') or cr.get('test') or cr.get('groupname')
-        if tn:
-            return tn
-        p = parent.get(cr)
-        while p is not None:
-            tn = p.get('name') or p.get('displayname') or p.get('testname')
-            if tn:
-                return tn
-            p = parent.get(p)
-        return u'(Без названия проверки)'
+        for item in items:
+            annotated = self._process_item(item)
+            if annotated:
+                result.append(annotated)
 
-    for cr in root.findall('.//clashresult'):
-        test_name  = _test_name_for_cr(cr)
-        clash_name = cr.get('name') or u'Без имени'
-        img_abs    = _img_abs_from_href(base_dir, cr.get('href') or u'')
+        return result
 
-        objs = []
-        for co in cr.findall('./clashobjects/clashobject'):
-            rid = _object_id_from_element(co)
-            if rid is None:
-                continue
-            objs.append({'id': rid, 'path': _pathlink_string_from_element(co)})
-
-        if not objs:
-            continue
-
-        rows = groups.setdefault(test_name, [])
-        if len(objs) >= 2:
-            a, b = objs[0], objs[1]
-            rows.append({'name': clash_name, 'img': img_abs, 'id': a['id'], 'id_other': b['id'],
-                         'path': a['path'], 'path_other': b['path']})
-            rows.append({'name': clash_name, 'img': img_abs, 'id': b['id'], 'id_other': a['id'],
-                         'path': b['path'], 'path_other': a['path']})
-        else:
-            ob = objs[0]
-            rows.append({'name': clash_name, 'img': img_abs, 'id': ob['id'], 'id_other': None,
-                         'path': ob['path'], 'path_other': u''})
-
-    return groups
-
-# =================== fallback (регулярки) ===================
-_RX_CTEST_BLOCK = re.compile(r'<clashtest\b[^>]*>.*?</clashtest>', re.DOTALL | re.IGNORECASE)
-_RX_TEST_BLOCK  = re.compile(r'<test\b[^>]*>.*?</test>', re.DOTALL | re.IGNORECASE)
-_RX_TEST_NAME   = re.compile(r'\bname=\"([^\"]+)\"', re.IGNORECASE)
-_RX_ATTR_TESTNM = re.compile(r'\btestname=\"([^\"]+)\"', re.IGNORECASE)
-_RX_CR_BLOCK    = re.compile(r'<clashresult\b[^>]*>.*?</clashresult>', re.DOTALL | re.IGNORECASE)
-_RX_ATTR_HREF   = re.compile(r'\bhref=\"([^\"]*)\"', re.IGNORECASE)
-_RX_ATTR_CNAME  = re.compile(r'\bname=\"([^\"]+)\"', re.IGNORECASE)
-_RX_CO_BLOCK    = re.compile(r'<clashobject\b[^>]*>.*?</clashobject>', re.DOTALL | re.IGNORECASE)
-_RX_SMART_PAIR  = re.compile(r'<smarttag>.*?<name>(.*?)</name>.*?<value>(.*?)</value>.*?</smarttag>', re.DOTALL | re.IGNORECASE)
-_RX_OA_PAIR     = re.compile(r'<objectattribute>.*?<name>(.*?)</name>.*?<value>(.*?)</value>.*?</objectattribute>', re.DOTALL | re.IGNORECASE)
-_RX_PATHLINK    = re.compile(r'<pathlink>.*?</pathlink>', re.DOTALL | re.IGNORECASE)
-_RX_NODE_TEXT   = re.compile(r'<node>(.*?)</node>', re.DOTALL | re.IGNORECASE)
-_RX_TAGS        = re.compile(r'<[^>]+>')
-
-def _parse_groups_fallback(xml_path):
-    """
-    Возвращает dict как normal; дополнительно «предзаводит» пустые тесты.
-    """
-    txt = _sanitize_xml_text(_read_text_guess_enc(xml_path))
-    base_dir = os.path.dirname(xml_path)
-    groups = {}
-
-    blocks = list(_RX_CTEST_BLOCK.finditer(txt))
-    if not blocks:
-        blocks = list(_RX_TEST_BLOCK.finditer(txt))
-    if not blocks:
-        blocks = [type('M', (), {'group': (lambda self, n=0: txt)})()]
-
-    for bm in blocks:
-        tblock = bm.group(0) if hasattr(bm, 'group') else bm
-        tname_m = _RX_TEST_NAME.search(tblock)
-        default_tname = tname_m.group(1) if tname_m else u'(Без названия проверки)'
-        groups.setdefault(default_tname, [])  # пустая группа, если конфликтов нет
-
-        for crm in _RX_CR_BLOCK.finditer(tblock):
-            crblock = crm.group(0)
-            tnm_m = _RX_ATTR_TESTNM.search(crblock)
-            test_name = tnm_m.group(1) if tnm_m else default_tname
-
-            img_rel = (_RX_ATTR_HREF.search(crblock).group(1) if _RX_ATTR_HREF.search(crblock) else u'')
-            img_abs = _img_abs_from_href(base_dir, img_rel)
-            cname   = (_RX_ATTR_CNAME.search(crblock).group(1) if _RX_ATTR_CNAME.search(crblock) else u'Без имени')
-
-            objs = []
-            for com in _RX_CO_BLOCK.finditer(crblock):
-                coblock = com.group(0)
-                rid = None
-                for nm, val in _RX_SMART_PAIR.findall(coblock):
-                    if (nm or u'').strip().lower() in ('объект id','object id','object 1 id','object 2 id','id объекта'):
-                        v = (val or u'').strip()
-                        if v.isdigit():
-                            rid = int(v); break
-                if rid is None:
-                    for nm, val in _RX_OA_PAIR.findall(coblock):
-                        if (nm or u'').strip().lower() in ('id объекта','object id','объект id'):
-                            v = (val or u'').strip()
-                            if v.isdigit():
-                                rid = int(v); break
-                path = u''
-                pl = _RX_PATHLINK.search(coblock)
-                if pl:
-                    parts = [t.strip() for t in _RX_NODE_TEXT.findall(pl.group(0))]
-                    parts = [_RX_TAGS.sub(u'', t) for t in parts if t]
-                    path  = u' / '.join(parts)
-                if rid is not None:
-                    objs.append({'id': rid, 'path': path})
-
-            if not objs:
-                continue
-
-            rows = groups.setdefault(test_name, [])
-            if len(objs) >= 2:
-                a, b = objs[0], objs[1]
-                rows.append({'name': cname, 'img': img_abs, 'id': a['id'], 'id_other': b['id'],
-                             'path': a['path'], 'path_other': b['path']})
-                rows.append({'name': cname, 'img': img_abs, 'id': b['id'], 'id_other': a['id'],
-                             'path': b['path'], 'path_other': a['path']})
-            else:
-                ob = objs[0]
-                rows.append({'name': cname, 'img': img_abs, 'id': ob['id'], 'id_other': None,
-                             'path': ob['path'], 'path_other': u''})
-
-    return groups
-
-# =================== фильтрация, подсветка и статистика ===================
-
-BADGE_STYLE_DARK = u'background:#2f3b4a; color:#fff; padding:1px 6px; border-radius:3px; font-weight:600;'
-
-def _filter_and_annotate(items):
-    """Возвращает список строк, прошедших фильтры, с полями cat и cat_other (если возможно)."""
-    kept = []
-    for it in items:
+    def _process_item(self, item):
+        """Обрабатывает одну строку."""
         try:
-            el, cat = _get_el_and_cat(int(it['id']))
-            if not el:
-                continue
+            element_id = int(item['id'])
+            element, category = self.cache.get_element_and_category(element_id)
 
+            if not element:
+                return None
+
+            # Фильтр по файлу
             if FILTER_BY_FILE:
-                if not (_filename_matches_current_model(it.get('path', u'')) or
-                        _filename_matches_current_model(it.get('path_other', u''))):
-                    continue
+                path_matches = (
+                    self.cache.matches_current_model(item.get('path', u'')) or
+                    self.cache.matches_current_model(item.get('path_other', u''))
+                )
+                if not path_matches:
+                    return None
 
-            if FILTER_BY_CATEGORY and cat:
-                ck = cat.strip().lower()
-                p1 = (it.get('path', u'') or u'').lower()
-                p2 = (it.get('path_other', u'') or u'').lower()
-                if (ck not in p1) and (ck not in p2):
-                    continue
+            # Фильтр по категории
+            if FILTER_BY_CATEGORY and category:
+                cat_lower = category.strip().lower()
+                path1 = (item.get('path', u'') or u'').lower()
+                path2 = (item.get('path_other', u'') or u'').lower()
+                if cat_lower not in path1 and cat_lower not in path2:
+                    return None
 
-            it2 = dict(it)
-            it2['cat'] = cat
+            # Создаём аннотированную копию
+            result = dict(item)
+            result['cat'] = category
 
-            id_other = it.get('id_other')
-            if id_other:
-                el2, cat2 = _get_el_and_cat(int(id_other))
-                it2['cat_other'] = cat2 if el2 else u""
+            # Категория второго элемента
+            other_id = item.get('id_other')
+            if other_id:
+                other_element, other_category = self.cache.get_element_and_category(int(other_id))
+                result['cat_other'] = other_category if other_element else u""
             else:
-                it2['cat_other'] = u""
+                result['cat_other'] = u""
 
-            kept.append(it2)
+            return result
+
         except Exception:
-            pass
-    return kept
+            return None
 
-def _first_doc_category_in_segment(seg_norm):
-    """Возвращает имя категории (нормализ.) из списка категорий документа, если сегмент похож на неё."""
-    if not seg_norm:
-        return None
-    for ck in _DOC_CAT_KEYS:
-        if not ck:
-            continue
-        # строгая/включающая проверка
-        if ck in seg_norm or seg_norm in ck:
-            # избегаем слишком общих коротких совпадений
-            if len(ck) >= 4 and len(seg_norm) >= 4:
-                return ck
-    return None
 
-def _hilite_category_in_path(path_text, category_name):
-    """
-    Подсвечивает категорию в path:
-    1) сначала пытаемся по фактическому имени категории (category_name),
-    2) если не нашли — ищем по совпадению с перечнем категорий документа.
-    """
-    if not path_text:
-        return u'—'
+# =============================================================================
+# ПОДСВЕТКА КАТЕГОРИЙ В ПУТИ
+# =============================================================================
 
-    segs = [s.strip() for s in path_text.split(u'/')]
-    already = False
-    ck_name = (category_name or u'').strip()
-    ck_norm = _norm_key(ck_name)
+class PathHighlighter:
+    """Подсветка категорий в путях элементов."""
 
-    # 1) точное имя категории
-    if ck_norm:
-        for i, s in enumerate(segs):
-            if ck_norm in _norm_key(s):
-                segs[i] = u'<span style="{st}">{txt}</span>'.format(st=BADGE_STYLE_DARK, txt=s)
-                already = True
-                break
+    def __init__(self, cache):
+        self.cache = cache
 
-    # 2) по списку категорий документа (если в (1) ничего не нашли)
-    if not already:
-        # отталкиваемся от сегмента после имени файла .nwc/.rvt
-        start = 0
-        for idx, s in enumerate(segs):
-            if _FILE_RX.match(s):
-                start = idx + 1
-                break
-        for i in range(start, len(segs)):
-            s = segs[i]
-            if '<span' in s:   # уже подсветили
-                continue
-            seg_norm = _norm_key(s)
-            match = _first_doc_category_in_segment(seg_norm)
+    def highlight(self, path_text, category_name):
+        """Подсвечивает категорию в пути."""
+        if not path_text:
+            return u'—'
+
+        segments = [s.strip() for s in path_text.split(u'/')]
+        highlighted = False
+
+        # 1. Пробуем подсветить по имени категории
+        if category_name:
+            category_key = self.cache.normalize_key(category_name.strip())
+            if category_key:
+                for i, segment in enumerate(segments):
+                    if category_key in self.cache.normalize_key(segment):
+                        segments[i] = self._wrap_in_badge(segment)
+                        highlighted = True
+                        break
+
+        # 2. Если не нашли - ищем по списку категорий документа
+        if not highlighted:
+            start_index = self._find_start_after_filename(segments)
+            for i in range(start_index, len(segments)):
+                if '<span' in segments[i]:
+                    continue
+
+                segment_key = self.cache.normalize_key(segments[i])
+                if self.cache.find_category_in_path(segment_key):
+                    segments[i] = self._wrap_in_badge(segments[i])
+                    break
+
+        return u' / '.join(segments)
+
+    def _find_start_after_filename(self, segments):
+        """Находит индекс сегмента после имени файла."""
+        for i, segment in enumerate(segments):
+            if Patterns.MODEL_FILE.match(segment):
+                return i + 1
+        return 0
+
+    def _wrap_in_badge(self, text):
+        """Оборачивает текст в span с подсветкой."""
+        return u'<span style="{style}">{text}</span>'.format(style=BADGE_STYLE, text=text)
+
+
+# =============================================================================
+# СТАТИСТИКА
+# =============================================================================
+
+class StatisticsBuilder:
+    """Построение статистики по коллизиям."""
+
+    def __init__(self, highlighter):
+        self.highlighter = highlighter
+
+    def build(self, filtered_groups):
+        """Строит статистику по группам."""
+        stats = {}
+
+        for test_name, rows in filtered_groups.items():
+            seen_pairs = set()
+            category_pairs = set()
+
+            for item in rows:
+                pair = self._extract_pair(item)
+                if not pair or pair in seen_pairs:
+                    continue
+
+                seen_pairs.add(pair)
+                cat_pair = self._extract_category_pair(item)
+                if cat_pair:
+                    category_pairs.add(cat_pair)
+
+            stats[test_name] = {
+                'pairs': len(seen_pairs),
+                'catpairs': category_pairs
+            }
+
+        return stats
+
+    def _extract_pair(self, item):
+        """Извлекает пару ID элементов."""
+        id1 = item.get('id')
+        id2 = item.get('id_other')
+
+        if not id1 or not id2:
+            return None
+
+        try:
+            a, b = int(id1), int(id2)
+            return (a, b) if a < b else (b, a)
+        except Exception:
+            return None
+
+    def _extract_category_pair(self, item):
+        """Извлекает пару категорий."""
+        cat1 = (item.get('cat') or u"").strip()
+        cat2 = (item.get('cat_other') or u"").strip()
+
+        # Если вторая категория не определена - пробуем извлечь из пути
+        if not cat2:
+            highlighted = self.highlighter.highlight(item.get('path_other') or u'', u'')
+            # Извлекаем текст из span
+            match = re.search(u'<span[^>]*>([^<]+)</span>', highlighted)
             if match:
-                segs[i] = u'<span style="{st}">{txt}</span>'.format(st=BADGE_STYLE_DARK, txt=s)
-                break
+                cat2 = match.group(1)
+            else:
+                cat2 = re.sub(u'<[^>]*>', u'', highlighted)
 
-    return u' / '.join(segs)
+        if cat1 or cat2:
+            return tuple(sorted([cat1 or u'—', cat2 or u'—']))
+        return None
 
-def _build_filtered_groups(groups):
-    return {t: _filter_and_annotate(rows) for t, rows in groups.items()}
 
-def _build_stats(filtered_groups):
-    stats = {}
-    for test, rows in filtered_groups.items():
-        seen_pairs = set()
-        catpairs   = set()
-        for it in rows:
-            i1 = it.get('id'); i2 = it.get('id_other')
-            if not i1 or not i2:
-                continue
-            try:
-                a, b = int(i1), int(i2)
-            except Exception:
-                continue
-            key = (a, b) if a < b else (b, a)
-            if key in seen_pairs:
-                continue
-            seen_pairs.add(key)
+# =============================================================================
+# ВЫВОД РЕЗУЛЬТАТОВ
+# =============================================================================
 
-            c1 = (it.get('cat') or u"").strip()
-            c2 = (it.get('cat_other') or u"").strip()
-            if not c2:
-                # если вторую категорию не удалось получить из Revit — попробуем из текста правого path
-                guess = _hilite_category_in_path(it.get('path_other') or u'', u'')
-                # вытащим голый текст без html, чтобы отобразить в сводке
-                c2 = re.sub(u'<[^>]*>', u'', guess)
-                # возьмём сам сегмент (последний <span>…</span>), если есть
-                m = re.search(u'<span[^>]*>([^<]+)</span>', guess)
-                if m:
-                    c2 = m.group(1)
+class ResultPrinter:
+    """Вывод результатов в UI."""
 
-            if c1 or c2:
-                catpairs.add(tuple(sorted([c1 or u'—', c2 or u'—'])))
+    def __init__(self, output, highlighter):
+        self.out = output
+        self.highlighter = highlighter
 
-        stats[test] = {'pairs': len(seen_pairs), 'catpairs': catpairs}
-    return stats
+    def print_report_date(self, date_value, date_source):
+        """Печатает дату отчёта."""
+        if date_value:
+            self.out.print_md(u"**Дата отчёта Navisworks:** {} _({})_".format(
+                date_value, date_source
+            ))
 
-# =================== печать ===================
+    def print_summary(self, filtered_groups, stats):
+        """Печатает краткую сводку."""
+        self.out.print_md(u"### Краткая сводка по выбранным проверкам")
 
-def _img_cell(path, w=96):
-    if not path or not os.path.exists(path):
-        return u'—'
-    uri = u'file:///' + path.replace('\\', '/')
-    return u'<img src="{0}" width="{1}" />'.format(uri, int(w))
+        lines = []
+        for test_name in sorted(filtered_groups.keys(), key=lambda s: s.lower()):
+            st = stats.get(test_name, {'pairs': 0, 'catpairs': set()})
+            cat_pairs_str = u'; '.join(
+                u'{} × {}'.format(a, b) for (a, b) in sorted(st['catpairs'])
+            )
+            lines.append(u"- **{}** — {} коллизий; пары категорий: {}".format(
+                test_name, st['pairs'], cat_pairs_str or u'—'
+            ))
 
-def _print_group(title, rows):
-    out.print_md(u"\n---\n### Проверка: **{}**  _(строк: {})_".format(title, len(rows)))
-    if not rows:
-        out.print_md(u"—")
-        return
-    table_data = []
-    for i, it in enumerate(rows, 1):
-        path1 = _hilite_category_in_path(it.get('path') or u'', it.get('cat') or u'')
-        path2 = _hilite_category_in_path(it.get('path_other') or u'', it.get('cat_other') or u'')
-        table_data.append([
-            i,
-            _img_cell(it.get('img'), w=96),
-            title,
-            it.get('name') or u'',
-            out.linkify(ElementId(int(it['id']))),
-            path1 or u'—',
-            path2 or u'—'
-        ])
-    out.print_table(
-        table_data=table_data,
-        columns=[u'№', u'Снимок', u'Название проверки', u'Пересечение', u'ID', u'Путь элемента', u'Путь второго элемента'],
-        title=None
-    )
+        self.out.print_md(u'\n'.join(lines))
 
-# =================== MAIN ===================
+    def print_total(self, filtered_groups):
+        """Печатает общее количество."""
+        total_rows = sum(len(rows) for rows in filtered_groups.values())
+        self.out.print_md(u"## Пересечения: {} строк ({} проверок)".format(
+            total_rows, len(filtered_groups)
+        ))
+
+    def print_group(self, title, rows):
+        """Печатает таблицу для группы проверок."""
+        self.out.print_md(u"\n---\n### Проверка: **{}**  _(строк: {})_".format(
+            title, len(rows)
+        ))
+
+        if not rows:
+            self.out.print_md(u"—")
+            return
+
+        table_data = []
+        for i, item in enumerate(rows, 1):
+            path1 = self.highlighter.highlight(item.get('path') or u'', item.get('cat') or u'')
+            path2 = self.highlighter.highlight(item.get('path_other') or u'', item.get('cat_other') or u'')
+
+            table_data.append([
+                i,
+                self._format_image(item.get('img')),
+                title,
+                item.get('name') or u'',
+                self.out.linkify(ElementId(int(item['id']))),
+                path1 or u'—',
+                path2 or u'—'
+            ])
+
+        self.out.print_table(
+            table_data=table_data,
+            columns=[
+                u'№', u'Снимок', u'Название проверки', u'Пересечение',
+                u'ID', u'Путь элемента', u'Путь второго элемента'
+            ],
+            title=None
+        )
+
+    def print_footer(self):
+        """Печатает подвал."""
+        self.out.print_md(u"_Клик по **ID** выделяет элемент. Можно кликать подряд._")
+
+    def _format_image(self, path, width=96):
+        """Форматирует ячейку с изображением."""
+        if not path or not os.path.exists(path):
+            return u'—'
+        uri = u'file:///' + path.replace('\\', '/')
+        return u'<img src="{}" width="{}" />'.format(uri, int(width))
+
+
+# =============================================================================
+# ГЛАВНАЯ ФУНКЦИЯ
+# =============================================================================
 
 def main():
-    xml_path = forms.pick_file(files_filter="XML (*.xml)|*.xml",
-                               title=u"Выберите XML отчёт Navisworks")
+    # Выбор файла
+    xml_path = forms.pick_file(
+        files_filter="XML (*.xml)|*.xml",
+        title=u"Выберите XML отчёт Navisworks"
+    )
     if not xml_path:
         forms.alert(u"Файл не выбран.", title=u"Пересечения")
         return
 
-    try:
-        groups = _parse_groups_normal(xml_path)
-    except Exception as e:
-        out.print_md(u":warning: Нормальный парсер не справился (`{}`). Перехожу на fallback…".format(e))
-        groups = _parse_groups_fallback(xml_path)
+    # Парсинг
+    parser = NavisworksReportParser(xml_path)
+    groups = parser.parse()
 
     if not groups:
         forms.alert(u"Не удалось извлечь данные из отчёта.", title=u"Пересечения")
         return
 
-    # ---- Выбор проверок (включая пустые) ----
+    # Выбор проверок
     all_tests = sorted(groups.keys(), key=lambda s: s.lower())
     picked = forms.SelectFromList.show(
         all_tests,
@@ -540,34 +881,36 @@ def main():
         title=u"Выберите проверки (можно несколько). Вверху есть строка поиска.",
         button_name=u"Показать"
     )
+
     if picked and len(picked) < len(all_tests):
         groups = {t: groups.get(t, []) for t in picked}
 
+    # Инициализация компонентов
+    highlighter = PathHighlighter(element_cache)
+    result_filter = ResultFilter(element_cache)
+    stats_builder = StatisticsBuilder(highlighter)
+    printer = ResultPrinter(out, highlighter)
+
     # Дата отчёта
-    rep_dt, rep_src = _extract_report_datetime(xml_path)
-    if rep_dt:
-        out.print_md(u"**Дата отчёта Navisworks:** {} _({})_".format(rep_dt, rep_src))
+    report_date, date_source = extract_report_datetime(xml_path)
+    printer.print_report_date(report_date, date_source)
 
-    # Фильтрация и аннотация
-    filtered_groups = _build_filtered_groups(groups)
+    # Фильтрация
+    filtered_groups = {
+        test: result_filter.filter_and_annotate(rows)
+        for test, rows in groups.items()
+    }
 
-    # Сводка по коллизиям (по парам элементов, без задвоения)
-    stats = _build_stats(filtered_groups)
-    out.print_md(u"### Краткая сводка по выбранным проверкам")
-    lines = []
-    for test in sorted(filtered_groups.keys(), key=lambda s: s.lower()):
-        st = stats.get(test, {'pairs': 0, 'catpairs': set()})
-        cpairs = u'; '.join(u'{} × {}'.format(a, b) for (a, b) in sorted(st['catpairs']))
-        lines.append(u"- **{}** — {} коллизий; пары категорий: {}".format(test, st['pairs'], cpairs or u'—'))
-    out.print_md(u'\n'.join(lines))
-
-    total_rows = sum(len(v) for v in filtered_groups.values())
-    out.print_md(u"## Пересечения: {} строк ({} проверок)".format(total_rows, len(filtered_groups)))
+    # Статистика и вывод
+    stats = stats_builder.build(filtered_groups)
+    printer.print_summary(filtered_groups, stats)
+    printer.print_total(filtered_groups)
 
     for test_name in sorted(filtered_groups.keys(), key=lambda s: s.lower()):
-        _print_group(test_name, filtered_groups[test_name])
+        printer.print_group(test_name, filtered_groups[test_name])
 
-    out.print_md(u"_Клик по **ID** выделяет элемент. Можно кликать подряд._")
+    printer.print_footer()
+
 
 if __name__ == "__main__":
     main()

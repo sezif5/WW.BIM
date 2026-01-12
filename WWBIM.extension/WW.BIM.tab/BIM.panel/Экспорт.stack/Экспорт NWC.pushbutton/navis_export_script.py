@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 __title__  = "Экспорт NWC"
 __author__ = "vlad / you"
-__doc__    = "Экспорт .nwc в выбранную папку (без создания подпапок). Открытие РН через openbg: все, кроме начинающихся с '00_'. Совместимость Revit 2022/2023."
+__doc__    = "Экспорт .nwc в выбранную папку (без создания подпапок). Открытие РН через openbg: все, кроме начинающихся с '00_' и содержащих 'Link'/'Связь'. Совместимость Revit 2022/2023."
 
 import os
 import datetime
@@ -302,13 +302,27 @@ def main():
             out.update_progress(i + 1, len(sel_models))
             continue
 
-        # Открываем через openbg: все РН, кроме начинающихся с '00_'
+        # Открываем через openbg: все РН, кроме начинающихся с '00_' и содержащих 'Link'/'Связь'
         t_open = coreutils.Timer()
+
+        # Функция-предикат для фильтрации рабочих наборов
+        def workset_filter(ws_name):
+            """Возвращает True, если рабочий набор нужно открыть"""
+            name = (ws_name or u"").strip()
+            # Исключаем: начинающиеся с '00_'
+            if name.startswith(u'00_'):
+                return False
+            # Исключаем: содержащие 'Link' или 'Связь' (регистронезависимо)
+            name_lower = name.lower()
+            if u'link' in name_lower or u'связь' in name_lower:
+                return False
+            return True
+
         try:
-            doc = openbg.open_in_background(
+            doc, failure_handler = openbg.open_in_background(
                 __revit__.Application, __revit__, mp,
                 audit=False,
-                worksets='all_except_00',
+                worksets=('predicate', workset_filter),
                 detach=True  # Отсоединить с сохранением рабочих наборов
             )
         except Exception as e:
@@ -316,6 +330,31 @@ def main():
             out.update_progress(i + 1, len(sel_models))
             continue
         open_s = str(datetime.timedelta(seconds=int(t_open.get_time())))
+
+        # Вывод информации об обработанных предупреждениях/ошибках
+        if failure_handler is not None:
+            try:
+                summary = failure_handler.get_summary()
+                total_w = summary.get('total_warnings', 0)
+                total_e = summary.get('total_errors', 0)
+                if total_w > 0 or total_e > 0:
+                    out.print_md(u":warning: При открытии обработано автоматически: **{} предупреждений, {} ошибок**".format(total_w, total_e))
+                    # Вывод первых 5 предупреждений
+                    if total_w > 0:
+                        warnings = summary.get('warnings', [])
+                        for idx, w in enumerate(warnings[:5], 1):
+                            out.print_md(u"  {}. {}".format(idx, w))
+                        if total_w > 5:
+                            out.print_md(u"  ... и ещё {} предупреждений".format(total_w - 5))
+                    # Вывод первых 3 ошибок
+                    if total_e > 0:
+                        errors = summary.get('errors', [])
+                        for idx, err in enumerate(errors[:3], 1):
+                            out.print_md(u"  Ошибка {}: {}".format(idx, err))
+                        if total_e > 3:
+                            out.print_md(u"  ... и ещё {} ошибок".format(total_e - 3))
+            except Exception:
+                pass
 
         # Вид Navisworks
         try:

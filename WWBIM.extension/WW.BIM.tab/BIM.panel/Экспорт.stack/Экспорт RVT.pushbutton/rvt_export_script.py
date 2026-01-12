@@ -3,7 +3,9 @@ __title__  = "Экспорт RVT"
 __author__ = "vlad / you"
 __doc__    = ("Открывает модели с Revit Server в фоне и сохраняет в локальную папку.\n"
               "Режимы: preserve (Detach&Preserve + SaveAsCentral), "
-              "discard (Detach&Discard), none (без Detach).")
+              "discard (Detach&Discard), none (без Detach).\n"
+              "Открытие РН: все, кроме начинающихся с '00_' и содержащих 'Link'/'Связь'.\n"
+              "Автоматическая обработка предупреждений Revit.")
 
 import os, datetime
 from pyrevit import script, coreutils, forms
@@ -23,9 +25,9 @@ import closebg  # корректное закрытие/синхронизаци
 
 # ---------------- настройки ----------------
 DETACH_MODE        = "preserve"       # "preserve" | "discard" | "none"
-OPEN_WORKSETS_RULE = "all_except_00"  # как в твоём NWC-скрипте
 COMPACT_ON_SAVE    = True
 OVERWRITE_SAME     = True
+# Фильтр рабочих наборов: исключаются начинающиеся с "00_" и содержащие "Link"/"Связь"
 
 # ---------------- helpers ----------------
 out = script.get_output()
@@ -471,39 +473,67 @@ def is_workshared_file(mp):
         # Если не удалось определить — считаем что workshared (безопаснее)
         return True
 
+def get_workset_filter():
+    """Возвращает функцию-предикат для фильтрации рабочих наборов"""
+    def workset_filter(ws_name):
+        """Возвращает True, если рабочий набор нужно открыть"""
+        name = (ws_name or u"").strip()
+        # Исключаем: начинающиеся с '00_'
+        if name.startswith(u'00_'):
+            return False
+        # Исключаем: содержащие 'Link' или 'Связь' (регистронезависимо)
+        name_lower = name.lower()
+        if u'link' in name_lower or u'связь' in name_lower:
+            return False
+        return True
+    return workset_filter
+
 def open_document(mp, worksets_rule):
+    """
+    Открывает документ с автоматической обработкой предупреждений.
+    Возвращает кортеж (doc, failure_handler).
+    """
     app = __revit__.Application
     ui  = __revit__
-    opts = OpenOptions()
-    opts.Audit = False
 
     # Проверяем, является ли файл workshared
     workshared = is_workshared_file(mp)
-    
+
     if not workshared:
-        # Для не-workshared файлов — просто открываем без Detach и без настройки РН
+        # Для не-workshared файлов — используем openbg без detach
         out.print_md(u"  :information_source: Файл не является Workshared")
-        return app.OpenDocumentFile(mp, opts)
+        return openbg.open_in_background(app, ui, mp, audit=False, worksets=worksets_rule, detach=False, suppress_warnings=True)
 
     if DETACH_MODE == "preserve":
-        opts.DetachFromCentralOption = DetachFromCentralOption.DetachAndPreserveWorksets
-        try:
-            cfg = openbg._build_ws_config(ui, mp, worksets_rule)
-            opts.SetOpenWorksetsConfiguration(cfg)
-        except Exception as e:
-            # Fallback: открыть все рабочие наборы
-            out.print_md(u"  :warning: Не удалось настроить РН ({}), открываю все".format(e))
-            from Autodesk.Revit.DB import WorksetConfiguration, WorksetConfigurationOption
-            cfg = WorksetConfiguration(WorksetConfigurationOption.OpenAllWorksets)
-            opts.SetOpenWorksetsConfiguration(cfg)
-        return app.OpenDocumentFile(mp, opts)
+        # Используем openbg.open_in_background с detach=True
+        return openbg.open_in_background(app, ui, mp, audit=False, worksets=worksets_rule, detach=True, suppress_warnings=True)
 
     if DETACH_MODE == "discard":
+        # Для discard режима используем openbg с специальной настройкой
+        # К сожалению, openbg.open_in_background поддерживает только DetachAndPreserveWorksets
+        # Поэтому используем прямой вызов с ручным обработчиком предупреждений
+        opts = OpenOptions()
+        opts.Audit = False
         opts.DetachFromCentralOption = DetachFromCentralOption.DetachAndDiscardWorksets
-        return app.OpenDocumentFile(mp, opts)
+
+        # Создаем обработчик предупреждений вручную
+        failure_handler = openbg.SuppressWarningsPreprocessor()
+        try:
+            app.FailuresProcessing += failure_handler.PreprocessFailures
+        except Exception:
+            pass
+
+        try:
+            doc = app.OpenDocumentFile(mp, opts)
+            return (doc, failure_handler)
+        finally:
+            try:
+                app.FailuresProcessing -= failure_handler.PreprocessFailures
+            except Exception:
+                pass
 
     # DETACH_MODE == "none"
-    return openbg.open_in_background(app, ui, mp, audit=False, worksets=worksets_rule)
+    return openbg.open_in_background(app, ui, mp, audit=False, worksets=worksets_rule, detach=False, suppress_warnings=True)
 
 # ---------------- сохранение ----------------
 def save_document(doc, full_path):
@@ -549,8 +579,9 @@ def main():
 
     out.print_md("## Сохранение RVT ({} шт.)".format(len(sel_models)))
     out.print_md("Папка: **{}**".format(export_root))
-    out.print_md("Режим Detach: `{}`; РН: `{}`; Compact: {}; Overwrite: {}"
-                 .format(DETACH_MODE, OPEN_WORKSETS_RULE, COMPACT_ON_SAVE, OVERWRITE_SAME))
+    out.print_md("Режим Detach: `{}`; Compact: {}; Overwrite: {}"
+                 .format(DETACH_MODE, COMPACT_ON_SAVE, OVERWRITE_SAME))
+    out.print_md(u"РН: исключаются `00_*`, `*Link*`, `*Связь*`")
     
     # Выводим выбранные настройки очистки
     cleanup_info = []
@@ -582,12 +613,41 @@ def main():
 
         # Открытие
         t_open = coreutils.Timer()
+
+        # Используем фильтр рабочих наборов (исключаем 00_, Link, Связь)
+        workset_rule = ('predicate', get_workset_filter())
+
         try:
-            doc = open_document(mp, OPEN_WORKSETS_RULE)
+            doc, failure_handler = open_document(mp, workset_rule)
         except Exception as e:
             out.print_md(":x: Ошибка открытия: `{}`".format(e))
             out.update_progress(i + 1, len(sel_models)); continue
         open_s = str(datetime.timedelta(seconds=int(t_open.get_time())))
+
+        # Вывод информации об обработанных предупреждениях/ошибках
+        if failure_handler is not None:
+            try:
+                summary = failure_handler.get_summary()
+                total_w = summary.get('total_warnings', 0)
+                total_e = summary.get('total_errors', 0)
+                if total_w > 0 or total_e > 0:
+                    out.print_md(u"  :warning: При открытии обработано автоматически: **{} предупреждений, {} ошибок**".format(total_w, total_e))
+                    # Вывод первых 3 предупреждений (короче, чем в NWC скрипте)
+                    if total_w > 0:
+                        warnings = summary.get('warnings', [])
+                        for idx, w in enumerate(warnings[:3], 1):
+                            out.print_md(u"    {}. {}".format(idx, w))
+                        if total_w > 3:
+                            out.print_md(u"    ... и ещё {} предупреждений".format(total_w - 3))
+                    # Вывод первых 2 ошибок
+                    if total_e > 0:
+                        errors = summary.get('errors', [])
+                        for idx, err in enumerate(errors[:2], 1):
+                            out.print_md(u"    Ошибка {}: {}".format(idx, err))
+                        if total_e > 2:
+                            out.print_md(u"    ... и ещё {} ошибок".format(total_e - 2))
+            except Exception:
+                pass
 
         # Удаление 2D-подложек (CAD импорты, CAD связи, изображения)
         any_cleanup = cleanup_settings.get('cad_imports') or cleanup_settings.get('cad_links') or cleanup_settings.get('raster_images')

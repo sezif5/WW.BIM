@@ -10,10 +10,61 @@ from Autodesk.Revit.DB import (
     ModelPathUtils, WorksharingUtils, WorksetId,
     OpenOptions, WorksetConfiguration, WorksetConfigurationOption,
     DetachFromCentralOption,
-    BuiltInCategory, Category, ElementId, View3D, ViewFamilyType, ViewFamily, Transaction, FilteredElementCollector
+    BuiltInCategory, Category, ElementId, View3D, ViewFamilyType, ViewFamily, Transaction, FilteredElementCollector,
+    IFailuresPreprocessor, FailureProcessingResult, FailureSeverity
 )
 from System.Collections.Generic import List
 from System import Enum
+
+# ---------------- Failures Processor ----------------
+
+class SuppressWarningsPreprocessor(IFailuresPreprocessor):
+    """
+    Автоматический обработчик предупреждений и ошибок Revit.
+    Удаляет все предупреждения, чтобы диалоги не блокировали выполнение скрипта.
+    Собирает информацию об обработанных предупреждениях/ошибках для отчета.
+    """
+    def __init__(self):
+        self.warnings = []
+        self.errors = []
+
+    def PreprocessFailures(self, failuresAccessor):
+        try:
+            failures = failuresAccessor.GetFailureMessages()
+            for failure in failures:
+                try:
+                    severity = failure.GetSeverity()
+                    desc = u""
+                    try:
+                        desc = failure.GetDescriptionText() or u""
+                    except Exception:
+                        pass
+
+                    # Удаляем предупреждения (Warning)
+                    if severity == FailureSeverity.Warning:
+                        self.warnings.append(desc)
+                        failuresAccessor.DeleteWarning(failure)
+                    # Для ошибок пытаемся использовать дефолтное решение
+                    elif severity == FailureSeverity.Error:
+                        self.errors.append(desc)
+                        try:
+                            failuresAccessor.ResolveFailure(failure)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+            return FailureProcessingResult.Continue
+        except Exception:
+            return FailureProcessingResult.Continue
+
+    def get_summary(self):
+        """Возвращает сводку об обработанных предупреждениях и ошибках."""
+        return {
+            'warnings': list(self.warnings),
+            'errors': list(self.errors),
+            'total_warnings': len(self.warnings),
+            'total_errors': len(self.errors)
+        }
 
 # ---------------- helpers ----------------
 
@@ -245,13 +296,18 @@ def _hide_categories_by_names(doc, view, names):
 
 # ----------- public API -----------
 
-def open_in_background(app_or_uiapp, maybe_uiapp, model_path_or_str, audit=False, worksets='lastviewed', detach=False):
+def open_in_background(app_or_uiapp, maybe_uiapp, model_path_or_str, audit=False, worksets='lastviewed', detach=False, suppress_warnings=True):
     """
     Открыть документ в фоне.
-    
+
     Args:
         detach: если True — открыть с опцией "Отсоединить с сохранением рабочих наборов"
                 (DetachAndPreserveWorksets)
+        suppress_warnings: если True — автоматически подавлять предупреждения и ошибки при открытии
+
+    Returns:
+        tuple: (doc, failure_handler) - документ и обработчик предупреждений (или None, если suppress_warnings=False)
+               Используйте failure_handler.get_summary() для получения информации об обработанных ошибках/предупреждениях
     """
     app, uiapp = _coerce_app_uiapp(app_or_uiapp, maybe_uiapp)
     mp = _to_model_path(model_path_or_str)
@@ -263,7 +319,7 @@ def open_in_background(app_or_uiapp, maybe_uiapp, model_path_or_str, audit=False
     except Exception: pass
     try: opts.SetOpenWorksetsConfiguration(cfg)
     except Exception: pass
-    
+
     # Отсоединить с сохранением рабочих наборов
     if detach:
         try:
@@ -271,33 +327,53 @@ def open_in_background(app_or_uiapp, maybe_uiapp, model_path_or_str, audit=False
         except Exception:
             pass
 
-    try:
-        return app.OpenDocumentFile(mp, opts)
-    except Exception as ex1:
-        msg = u"{}".format(ex1)
-        need_retry_lv = False
-        key = (worksets or '').strip().lower() if _is_string(worksets) else u''
-        if key in (u'lastviewed', u'last_viewed', u'last'): need_retry_lv = True
-        if 'LastViewed' in msg or ('attribute' in msg and 'LastViewed' in msg): need_retry_lv = True
+    # Обработчик предупреждений
+    failure_handler = None
+    if suppress_warnings:
+        failure_handler = SuppressWarningsPreprocessor()
+        try:
+            app.FailuresProcessing += failure_handler.PreprocessFailures
+        except Exception:
+            pass
 
-        if need_retry_lv:
+    try:
+        try:
+            doc = app.OpenDocumentFile(mp, opts)
+            return (doc, failure_handler)
+        except Exception as ex1:
+            msg = u"{}".format(ex1)
+            need_retry_lv = False
+            key = (worksets or '').strip().lower() if _is_string(worksets) else u''
+            if key in (u'lastviewed', u'last_viewed', u'last'): need_retry_lv = True
+            if 'LastViewed' in msg or ('attribute' in msg and 'LastViewed' in msg): need_retry_lv = True
+
+            if need_retry_lv:
+                try:
+                    cfg2 = _build_ws_config(uiapp, mp, 'all_except_00')
+                    opts2 = OpenOptions();
+                    try: opts2.Audit = bool(audit)
+                    except Exception: pass
+                    try: opts2.SetOpenWorksetsConfiguration(cfg2)
+                    except Exception: pass
+                    doc = app.OpenDocumentFile(mp, opts2)
+                    return (doc, failure_handler)
+                except Exception:
+                    cfg3 = _cfg_from_optname('OpenAllWorksets')
+                    opts3 = OpenOptions();
+                    try: opts3.Audit = bool(audit)
+                    except Exception: pass
+                    try: opts3.SetOpenWorksetsConfiguration(cfg3)
+                    except Exception: pass
+                    doc = app.OpenDocumentFile(mp, opts3)
+                    return (doc, failure_handler)
+            raise
+    finally:
+        # Отписываемся от события, чтобы не оставлять обработчик в памяти
+        if failure_handler is not None:
             try:
-                cfg2 = _build_ws_config(uiapp, mp, 'all_except_00')
-                opts2 = OpenOptions(); 
-                try: opts2.Audit = bool(audit)
-                except Exception: pass
-                try: opts2.SetOpenWorksetsConfiguration(cfg2)
-                except Exception: pass
-                return app.OpenDocumentFile(mp, opts2)
+                app.FailuresProcessing -= failure_handler.PreprocessFailures
             except Exception:
-                cfg3 = _cfg_from_optname('OpenAllWorksets')
-                opts3 = OpenOptions(); 
-                try: opts3.Audit = bool(audit)
-                except Exception: pass
-                try: opts3.SetOpenWorksetsConfiguration(cfg3)
-                except Exception: pass
-                return app.OpenDocumentFile(mp, opts3)
-        raise
+                pass
 
 def prepare_navisworks_view(doc, view):
     """Скрыть служебные/аннотационные категории. Отсутствующие — пропускаются. Возвращает число скрытых."""

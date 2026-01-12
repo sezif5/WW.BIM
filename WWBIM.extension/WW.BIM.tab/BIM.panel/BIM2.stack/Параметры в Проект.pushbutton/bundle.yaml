@@ -1,0 +1,14 @@
+title:
+  ru: "Параметры\nв проект"
+  en_us: "Family\nParameters"
+
+tooltip:
+  ru: >-
+    Пакетное добавление общих параметров в проект
+  en_us: >-
+    Batch addition of shared parameters to 
+author: Vlad
+help_url: ""
+
+min_revit_version: 2020
+max_revit_version: 2024

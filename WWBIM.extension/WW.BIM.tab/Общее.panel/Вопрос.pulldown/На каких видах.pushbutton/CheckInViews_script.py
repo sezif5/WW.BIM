@@ -174,11 +174,17 @@ def find_views_for_element(element, only_on_sheets=False, view_sheet_map=None):
     id_list.Add(element_id)
     id_filter = ElementIdSetFilter(id_list)
 
-    views = list(FilteredElementCollector(doc).OfClass(View))
+    all_views_list = list(FilteredElementCollector(doc).OfClass(View))
     
     # Если нужно проверять только виды на листах
     if only_on_sheets and view_sheet_map:
-        views = [v for v in views if v.Id.IntegerValue in view_sheet_map]
+        views = [v for v in all_views_list if v.Id.IntegerValue in view_sheet_map]
+        output.print_md(u"ℹ Применён фильтр: проверяются только виды на листах ({} из {})".format(len(views), len(all_views_list)))
+        output.print_md(u"")
+    else:
+        views = all_views_list
+        output.print_md(u"ℹ Проверяются все виды проекта: {}".format(len(views)))
+        output.print_md(u"")
     
     total = len(views)
     if total == 0:
@@ -192,18 +198,15 @@ def find_views_for_element(element, only_on_sheets=False, view_sheet_map=None):
         step=5
     ) as pb:
         for idx, view in enumerate(views):
-            # обновляем прогресс
-            try:
-                pb.update_progress(idx + 1, total)
-            except:
-                pass
+            # проверка на отмену пользователем (должна быть ДО обновления прогресса)
+            if pb.cancelled:
+                output.print_md(u"---")
+                output.print_md(u"## ⚠ Проверка отменена пользователем")
+                output.print_md(u"")
+                return []
 
-            # проверка на отмену пользователем
-            try:
-                if getattr(pb, 'cancelled', False):
-                    break
-            except:
-                pass
+            # обновляем прогресс
+            pb.update_progress(idx + 1, total)
 
             if view is None:
                 continue

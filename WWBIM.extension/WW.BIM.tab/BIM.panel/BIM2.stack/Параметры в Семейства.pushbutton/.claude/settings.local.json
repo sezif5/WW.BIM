@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(copy \"Z:\\\\02_Библиотека\\\\03_Dynamo\\\\Scripts\\\\WWBIM.extension\\\\WW.BIM.tab\\\\BIM.panel\\\\BIM2.stack\\\\Параметры в Семейства.pushbutton\\\\icon.png\" \"Z:\\\\02_Библиотека\\\\03_Dynamo\\\\Scripts\\\\WWBIM.extension\\\\WW.BIM.tab\\\\BIM.panel\\\\BIM2.stack\\\\Параметры в Проект.pushbutton\\\\icon.png\")",
+      "Bash(cmd /c copy:*)"
+    ]
+  }
+}

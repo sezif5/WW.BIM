@@ -24,7 +24,7 @@ from System.IO import StringReader
 from System.Collections.ObjectModel import ObservableCollection
 from System.Windows.Markup import XamlReader
 from System.Xml import XmlReader
-from System.Windows.Forms import FolderBrowserDialog, OpenFileDialog, DialogResult
+from System.Windows.Forms import FolderBrowserDialog, OpenFileDialog, SaveFileDialog, DialogResult
 from System.Collections.Generic import List, KeyValuePair
 
 # Revit API
@@ -42,6 +42,31 @@ uidoc = __revit__.ActiveUIDocument
 app = __revit__.Application
 
 # ---------------------------- Utilities ------------------------------------
+
+def safe_rollback(transaction, context=''):
+    """Безопасный откат транзакции с логированием."""
+    if transaction is None:
+        return
+    try:
+        if transaction.HasStarted() and not transaction.HasEnded():
+            transaction.RollBack()
+    except Exception as e:
+        logger.debug(u'Rollback failed{}: {}'.format(
+            u' (' + context + u')' if context else u'', e))
+
+def safe_call(func, default=None, context='', log_level='debug'):
+    """Безопасный вызов функции с логированием ошибок."""
+    try:
+        return func()
+    except Exception as e:
+        msg = u'{}: {}'.format(context, e) if context else unicode(e)
+        if log_level == 'warning':
+            logger.warning(msg)
+        elif log_level == 'error':
+            logger.error(msg)
+        else:
+            logger.debug(msg)
+        return default
 
 def ensure_shared_parameters_def_file():
     sp_path = app.SharedParametersFilename
@@ -62,6 +87,7 @@ def ensure_shared_parameters_def_file():
     return dfile
 
 def all_bipg_options():
+    """Получить список всех групп параметров с их локализованными названиями."""
     items = []
     for name in dir(BuiltInParameterGroup):
         if name.startswith('PG_') or name == 'INVALID':
@@ -69,9 +95,9 @@ def all_bipg_options():
                 enum_val = getattr(BuiltInParameterGroup, name)
                 label = LabelUtils.GetLabelFor(enum_val)
                 if label and label.strip():
-                    items.append( (label, enum_val) )
-            except:
-                pass
+                    items.append((label, enum_val))
+            except Exception as e:
+                logger.debug(u'Пропущена группа параметров {}: {}'.format(name, e))
     items.sort(key=lambda t: t[0].lower())
     return items
 
@@ -84,16 +110,19 @@ def walk_rfa_files(root, recursive=True):
             break
 
 def get_existing_family_param_by_name(fm, name):
+    """Найти параметр семейства по имени."""
     for fp in fm.Parameters:
         try:
             if fp.Definition and fp.Definition.Name == name:
                 return fp
-        except:
-            pass
+        except Exception as e:
+            logger.debug(u'Ошибка при проверке параметра: {}'.format(e))
     return None
 
 def _ensure_family_has_type(fdoc):
+    """Убедиться, что в семействе есть хотя бы один тип."""
     fm = fdoc.FamilyManager
+    t = None
     try:
         ct = fm.CurrentType
         if ct is None:
@@ -102,31 +131,44 @@ def _ensure_family_has_type(fdoc):
             newt = fm.NewType(u'Тип 1')
             fm.CurrentType = newt
             t.Commit()
-    except:
-        pass
+    except Exception as e:
+        safe_rollback(t, u'создание типа')
+        logger.warning(u'Не удалось создать тип по умолчанию: {}'.format(e))
 
 def _bool_to_int(b):
     return 1 if b else 0
 
 def _read_back_value(fm, fp):
+    """Прочитать значение параметра (пробует разные типы)."""
+    if fp is None:
+        return None
     try:
         ft = fm.CurrentType
-        if ft:
-            try:
-                return ft.AsString(fp)
-            except:
-                pass
-            try:
-                return ft.AsInteger(fp)
-            except:
-                pass
-            try:
-                return ft.AsDouble(fp)
-            except:
-                pass
+        if not ft:
+            return u'(нет текущего типа)'
+
+        storage_type = _get_storage_type(fp)
+        st_str = str(storage_type) if storage_type else ''
+
+        # Читаем в зависимости от типа хранения
+        if 'String' in st_str:
+            return ft.AsString(fp)
+        elif 'Integer' in st_str:
+            return ft.AsInteger(fp)
+        elif 'Double' in st_str:
+            return ft.AsDouble(fp)
+        else:
+            # Пробуем все методы
+            for method in (ft.AsString, ft.AsInteger, ft.AsDouble):
+                try:
+                    result = method(fp)
+                    if result is not None:
+                        return result
+                except Exception:
+                    continue
         return None
-    except:
-        return None
+    except Exception as e:
+        return u'(ошибка: {})'.format(e)
 
 def _to_bool(text):
     s = (text or u'').strip().lower()
@@ -140,159 +182,168 @@ def _strip_quotes(s):
     return s
 
 def _parse_number(text):
+    """Преобразовать текст в число (поддерживает запятую как разделитель)."""
     try:
         return float((text or u'').strip().replace(',', '.'))
-    except:
+    except ValueError:
         return None
 
-def _set_instance_default(fdoc, fm, fp, text_value):
-    """Присвоить значение по умолчанию для параметра ЭКЗЕМПЛЯРА на текущем типе."""
-    if text_value is None: return False, u'пусто'
-    d = fp.Definition
-    ptype = d.ParameterType
-    txt = text_value
-
+def _get_storage_type(fp):
+    """Получить тип хранения параметра (работает для всех версий Revit)."""
     try:
-        units = fdoc.GetUnits()
-    except:
-        units = None
+        return fp.StorageType
+    except Exception:
+        try:
+            return fp.Definition.ParameterType
+        except Exception:
+            return None
 
+def _get_param_type_name(fp):
+    """Получить имя типа параметра для диагностики."""
     try:
-        if ptype == ParameterType.Text or ptype.ToString() == 'Text':
-            try:
-                fm.Set(fp, _strip_quotes(txt))
-                return True, u''
-            except Exception as e_set_text:
-                try:
-                    # Фолбэк: попробуем как формулу (в кавычках)
-                    fm.SetFormula(fp, '"%s"' % _strip_quotes(txt))
-                    return True, u''
-                except Exception as e_set_text2:
-                    raise e_set_text2
+        # Revit 2022+
+        if hasattr(fp.Definition, 'GetDataType'):
+            return str(fp.Definition.GetDataType())
+        # Revit < 2022
+        return str(fp.Definition.ParameterType)
+    except Exception:
+        return u'Unknown'
 
-        if ptype == ParameterType.YesNo or ptype.ToString() == 'YesNo':
-            fm.Set(fp, int(_bool_to_int(_to_bool(txt))))
-            return True, u''
+def _set_formula_or_value(fdoc, fm, fp, text_value):
+    """Установить формулу или значение для параметра (экземпляра или типа)."""
+    if text_value is None:
+        return False, u'пусто'
+    if fp is None:
+        return False, u'параметр не найден'
 
-        if ptype == ParameterType.Integer or ptype.ToString() == 'Integer':
+    txt = text_value.strip()
+    if not txt:
+        return False, u'пустое значение'
+
+    # Диагностика
+    storage_type = _get_storage_type(fp)
+    param_type_name = _get_param_type_name(fp)
+    print(u'      [debug] StorageType={}, ParamType={}, Input="{}"'.format(
+        storage_type, param_type_name, txt))
+
+    # Подготовка формулы
+    formula = txt
+    # Для числовых формул заменяем запятую на точку (если это не строка в кавычках)
+    if not formula.startswith('"'):
+        formula = formula.replace(',', '.')
+
+    # 1) Сначала пробуем установить как ФОРМУЛУ
+    try:
+        fm.SetFormula(fp, formula)
+        print(u'      [formula] OK: "{}"'.format(formula))
+        return True, u'формула'
+    except Exception as e_formula:
+        print(u'      [formula] Не удалось: {}'.format(e_formula))
+
+    # 2) Если формула не сработала, пробуем как ЗНАЧЕНИЕ
+    try:
+        st_str = str(storage_type) if storage_type else ''
+
+        if 'String' in st_str:
+            fm.Set(fp, _strip_quotes(txt))
+            print(u'      [value] OK (String)')
+            return True, u'значение'
+
+        elif 'Integer' in st_str:
+            ptype_str = param_type_name.lower()
+            if 'yesno' in ptype_str or 'boolean' in ptype_str:
+                val = 1 if _to_bool(txt) else 0
+            else:
+                num = _parse_number(txt)
+                if num is None:
+                    return False, u'некорректное число'
+                val = int(round(num))
+            fm.Set(fp, val)
+            print(u'      [value] OK (Integer): {}'.format(val))
+            return True, u'значение'
+
+        elif 'Double' in st_str:
             num = _parse_number(txt)
-            if num is None: return False, u'некорректное число'
-            fm.Set(fp, int(round(num)))
-            return True, u''
-
-        if ptype == ParameterType.Number or ptype.ToString() == 'Number':
-            num = _parse_number(txt)
-            if num is None: return False, u'некорректное число'
+            if num is None:
+                return False, u'некорректное число'
             fm.Set(fp, float(num))
-            return True, u''
+            print(u'      [value] OK (Double): {}'.format(num))
+            return True, u'значение'
 
-        if ptype == ParameterType.Length or ptype.ToString() == 'Length':
-            from Autodesk.Revit.DB import UnitType, UnitUtils
-            num = _parse_number(txt)
-            if num is None: return False, u'некорректное число'
-            du = units.GetFormatOptions(UnitType.UT_Length).DisplayUnits if units else None
-            val = UnitUtils.ConvertToInternalUnits(num, du) if du else num
-            fm.Set(fp, float(val))
-            return True, u''
+        else:
+            # Fallback
+            fm.Set(fp, txt)
+            print(u'      [value] OK (fallback)')
+            return True, u'значение'
 
-        if ptype == ParameterType.Area or ptype.ToString() == 'Area':
-            from Autodesk.Revit.DB import UnitType, UnitUtils
-            num = _parse_number(txt)
-            if num is None: return False, u'некорректное число'
-            du = units.GetFormatOptions(UnitType.UT_Area).DisplayUnits if units else None
-            val = UnitUtils.ConvertToInternalUnits(num, du) if du else num
-            fm.Set(fp, float(val))
-            return True, u''
-
-        if ptype == ParameterType.Volume or ptype.ToString() == 'Volume':
-            from Autodesk.Revit.DB import UnitType, UnitUtils
-            num = _parse_number(txt)
-            if num is None: return False, u'некорректное число'
-            du = units.GetFormatOptions(UnitType.UT_Volume).DisplayUnits if units else None
-            val = UnitUtils.ConvertToInternalUnits(num, du) if du else num
-            fm.Set(fp, float(val))
-            return True, u''
-
-        if ptype == ParameterType.Angle or ptype.ToString() == 'Angle':
-            from Autodesk.Revit.DB import UnitType, UnitUtils
-            num = _parse_number(txt)
-            if num is None: return False, u'некорректное число'
-            du = units.GetFormatOptions(UnitType.UT_Angle).DisplayUnits if units else None
-            val = UnitUtils.ConvertToInternalUnits(num, du) if du else num
-            fm.Set(fp, float(val))
-            return True, u''
-
-        # Fallback — строкой
-        fm.Set(fp, txt)
-        return True, u''
-    except Exception as e:
-        return False, u'%s' % e
+    except Exception as e_value:
+        return False, u'формула: {} / значение: {}'.format(e_formula, e_value)
 
 def add_param_to_familydoc(fdoc, extdef, bipg, is_instance, formula_text):
-    if not extdef: return (False, u'Не найден ExtDef')
+    """Добавить общий параметр в документ семейства."""
+    if not extdef:
+        return (False, u'Не найден ExtDef')
+
     fm = fdoc.FamilyManager
-    if get_existing_family_param_by_name(fm, extdef.Name):
+    param_name = extdef.Name
+
+    # Проверяем, существует ли уже
+    existing = get_existing_family_param_by_name(fm, param_name)
+    if existing:
         return (False, u'Существует')
+
     _ensure_family_has_type(fdoc)
 
-    # 1) Добавляем параметр отдельной транзакцией
-    t1 = Transaction(fdoc, u'Добавить общий параметр: {}'.format(extdef.Name))
+    # 1) Добавляем параметр (без формулы - она будет применена отдельной транзакцией)
+    t1 = Transaction(fdoc, u'Добавить параметр: {}'.format(param_name))
     try:
         t1.Start()
-        fp = fm.AddParameter(extdef, bipg, is_instance)
-        formula_applied = False
-        formula_err = None
-        if (not is_instance) and formula_text and formula_text.strip():
-            try:
-                ftxt = (formula_text or u'').strip().replace(',', '.')
-                if ftxt:
-                    fm.SetFormula(fp, ftxt)
-                    formula_applied = True
-            except Exception as ee:
-                try:
-                    fp.Formula = ftxt
-                    formula_applied = True
-                except Exception as ee2:
-                    formula_err = u'{} / {}'.format(ee, ee2)
+        fm.AddParameter(extdef, bipg, is_instance)
         t1.Commit()
     except Exception as e:
-        try: t1.RollBack()
-        except: pass
-        return (False, u'Ошибка при добавлении: {}'.format(e))
+        safe_rollback(t1, param_name)
+        return (False, u'Ошибка добавления: {}'.format(e))
 
-    # 2) Для ЭКЗЕМПЛЯРА: проставим значение второй транзакцией
-    value_applied = False
-    value_err = None
-    if is_instance and formula_text and formula_text.strip():
-        try:
-            fp2 = get_existing_family_param_by_name(fm, extdef.Name)
-            t2 = Transaction(fdoc, u'Значение экземпляра: {}'.format(extdef.Name))
-            t2.Start()
-            ok, err = _set_instance_default(fdoc, fm, fp2, formula_text)
-            if ok:
-                value_applied = True
-            else:
-                value_err = err
-            # диагностика
+    # 2) Устанавливаем формулу/значение отдельной транзакцией
+    formula_applied = False
+    formula_err = None
+
+    if formula_text and formula_text.strip():
+        # Получаем параметр заново после коммита
+        fp = get_existing_family_param_by_name(fm, param_name)
+        if fp is None:
+            formula_err = u'параметр не найден после добавления'
+            print(u'      [error] {}'.format(formula_err))
+        else:
+            t2 = None
             try:
-                rb = _read_back_value(fm, fp2)
-                print(u'      [readback] {} = {}'.format(fp2.Definition.Name, rb))
-            except:
-                pass
-            t2.Commit()
-        except Exception as e2:
-            try: t2.RollBack()
-            except: pass
-            value_err = u'%s' % e2
+                t2 = Transaction(fdoc, u'Формула: {}'.format(param_name))
+                t2.Start()
 
-    if not is_instance:
-        if formula_applied: return (True, u'Добавлен (формула применена)')
-        elif formula_text and formula_text.strip(): return (True, u'Добавлен (без формулы: {})'.format(formula_err or u''))
-        else: return (True, u'Добавлен')
+                ok, result_type = _set_formula_or_value(fdoc, fm, fp, formula_text)
+                if ok:
+                    formula_applied = True
+                    formula_err = result_type  # 'формула' или 'значение'
+                else:
+                    formula_err = result_type
+
+                # Проверка: читаем значение обратно
+                rb = _read_back_value(fm, fp)
+                print(u'      [readback] {} = {}'.format(param_name, rb))
+
+                t2.Commit()
+            except Exception as e2:
+                safe_rollback(t2, param_name)
+                formula_err = unicode(e2)
+                print(u'      [error] Исключение: {}'.format(e2))
+
+    # Формируем результат
+    if formula_applied:
+        return (True, u'Добавлен + {}'.format(formula_err))
+    elif formula_text and formula_text.strip():
+        return (True, u'Добавлен (не применено: {})'.format(formula_err or u'?'))
     else:
-        if value_applied: return (True, u'Добавлен (значение экземпляра установлено)')
-        elif formula_text and formula_text.strip(): return (True, u'Добавлен (значение не применено: {})'.format(value_err or u''))
-        else: return (True, u'Добавлен')
+        return (True, u'Добавлен')
 
 # --------------------------- Data Model -------------------------------------
 
@@ -331,123 +382,22 @@ class QueueItem(object):
 
 # ------------------------------ XAML UI -------------------------------------
 
-XAML = u"""
-<Window xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation'
-        xmlns:x='http://schemas.microsoft.com/winfx/2006/xaml'
-        Title='Пакетное добавление общих параметров' Height='660' Width='900'
-        WindowStartupLocation='CenterScreen' Background='#FFF'>
-  <Grid Margin='10'>
-    <Grid.ColumnDefinitions>
-      <ColumnDefinition Width='260'/>
-      <ColumnDefinition Width='10'/>
-      <ColumnDefinition Width='*'/>
-    </Grid.ColumnDefinitions>
-    <Grid.RowDefinitions>
-      <RowDefinition Height='Auto'/>
-      <RowDefinition Height='*'/>
-      <RowDefinition Height='Auto'/>
-    </Grid.RowDefinitions>
+SCRIPT_DIR = os.path.dirname(__file__)
+XAML_FILE = os.path.join(SCRIPT_DIR, 'MainWindow.xaml')
 
-    <GroupBox Header='Добавить параметры в:' Grid.Column='0' Grid.Row='0' Padding='8' Margin='0,0,0,8'>
-      <StackPanel>
-        <RadioButton x:Name='rbActive' Content='Активное семейство' IsChecked='True' Margin='0,0,0,6'/>
-        <RadioButton x:Name='rbOpen' Content='Все открытые семейства' Margin='0,0,0,6'/>
-        <RadioButton x:Name='rbFolder' Content='Семейства в выбранной папке' Margin='0,0,0,6'/>
-        <StackPanel Orientation='Horizontal' Margin='0,4,0,0'>
-          <Button x:Name='btnPickFolder' Content='Выберите папку с семействами' Width='220' IsEnabled='False'/>
-        </StackPanel>
-      </StackPanel>
-    </GroupBox>
-
-    <Border Grid.Column='1'/>
-
-    <Grid Grid.Column='2'>
-      <Grid.RowDefinitions>
-        <RowDefinition Height='240'/>
-        <RowDefinition Height='Auto'/>
-        <RowDefinition Height='*'/>
-      </Grid.RowDefinitions>
-
-      <Grid Grid.Row='0'>
-        <Grid.ColumnDefinitions>
-          <ColumnDefinition Width='*'/>
-          <ColumnDefinition Width='10'/>
-          <ColumnDefinition Width='*'/>
-        </Grid.ColumnDefinitions>
-        <GroupBox Header='Группа общих параметров:' Grid.Column='0' Padding='6' Margin='0,0,0,8'>
-          <ListBox x:Name='lbGroups'/>
-        </GroupBox>
-        <Border Grid.Column='1'/>
-        <GroupBox Header='Общие параметры:' Grid.Column='2' Padding='6' Margin='0,0,0,8'>
-          <ListBox x:Name='lbParams' SelectionMode='Extended'/>
-        </GroupBox>
-      </Grid>
-
-      <Grid Grid.Row='1' Margin='0,0,0,8'>
-        <Grid.ColumnDefinitions>
-          <ColumnDefinition Width='*'/>
-          <ColumnDefinition Width='*'/>
-          <ColumnDefinition Width='*'/>
-          <ColumnDefinition Width='Auto'/>
-        </Grid.ColumnDefinitions>
-        <StackPanel Orientation='Vertical' Grid.Column='0' Margin='0,0,8,0'>
-          <TextBlock Text='Группирование параметров:' Margin='0,0,0,4'/>
-          <ComboBox x:Name='cbBipg' MinWidth='180'/>
-        </StackPanel>
-        <StackPanel Grid.Column='1' Orientation='Vertical' Margin='0,0,8,0'>
-          <TextBlock Text='Добавить в:' Margin='0,0,0,4'/>
-          <StackPanel Orientation='Horizontal'>
-            <RadioButton x:Name='rbType' Content='Тип' Margin='0,0,16,0'/>
-            <RadioButton x:Name='rbInst' Content='Экземпляр' IsChecked='True'/>
-          </StackPanel>
-        </StackPanel>
-        <StackPanel Grid.Column='2' Orientation='Vertical' Margin='0,0,8,0'>
-          <TextBlock Text='Формула / значение (для экз.)' Margin='0,0,0,4'/>
-          <TextBox x:Name='tbFormula'/>
-        </StackPanel>
-        <StackPanel Grid.Column='3' Orientation='Vertical' HorizontalAlignment='Right'>
-          <Button x:Name='btnAdd' Content='Добавить ▶' Width='120' Height='30' Margin='0,18,0,0'/>
-        </StackPanel>
-      </Grid>
-
-      <GroupBox Grid.Row='2' Header='Очередь добавления' Padding='6'>
-        <DockPanel>
-          <StackPanel DockPanel.Dock='Bottom' Orientation='Horizontal' HorizontalAlignment='Left' Margin='0,6,0,0'>
-            <Button x:Name='btnOpen' Content='Открыть' Width='90' Margin='0,0,6,0'/>
-            <Button x:Name='btnSave' Content='Сохранить' Width='110' Margin='0,0,6,0'/>
-            <Button x:Name='btnRemove' Content='Удалить ▲' Width='110'/>
-          </StackPanel>
-          <DataGrid x:Name='dgQueue' AutoGenerateColumns='False' CanUserAddRows='False' IsReadOnly='False'>
-            <DataGrid.Columns>
-              <DataGridTextColumn Header='Параметр' Binding='{Binding Name}' IsReadOnly='True' Width='*'/>
-              <DataGridCheckBoxColumn Header='Экземпляр' Binding='{Binding IsInstance, Mode=TwoWay}' Width='100'/>
-              <DataGridComboBoxColumn x:Name='colBipg' Header='Группирование'
-                                      SelectedValueBinding='{Binding Bipg, Mode=TwoWay}' Width='200'/>
-              <DataGridTextColumn Header='Формула / Значение'
-                                  Binding='{Binding Formula, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}'
-                                  Width='260'/>
-            </DataGrid.Columns>
-          </DataGrid>
-        </DockPanel>
-      </GroupBox>
-    </Grid>
-
-    <StackPanel Grid.Row='2' Grid.ColumnSpan='3' Orientation='Horizontal' HorizontalAlignment='Right' Margin='0,10,0,0'>
-      <Button x:Name='btnOk' Content='Ok' Width='100' Margin='0,0,8,0'/>
-      <Button x:Name='btnCancel' Content='Отмена' Width='100'/>
-    </StackPanel>
-
-  </Grid>
-</Window>
-"""
+def load_xaml_window(xaml_path):
+    """Загрузить WPF окно из XAML файла."""
+    with open(xaml_path, 'rb') as f:
+        xaml_content = f.read().decode('utf-8')
+    sr = StringReader(xaml_content)
+    xr = XmlReader.Create(sr)
+    return XamlReader.Load(xr)
 
 # ----------------------------- Window Logic ---------------------------------
 
 class MainController(object):
     def __init__(self):
-        sr = StringReader(XAML)
-        xr = XmlReader.Create(sr)
-        self.w = XamlReader.Load(xr)
+        self.w = load_xaml_window(XAML_FILE)
 
         # Bind controls
         self.rbActive = self.w.FindName('rbActive')
@@ -538,15 +488,18 @@ class MainController(object):
     def _on_group_changed(self, sender=None, args=None):
         self.lbParams.Items.Clear()
         idx = self.lbGroups.SelectedIndex
-        if idx < 0: return
+        if idx < 0:
+            return
         gname = self.lbGroups.SelectedItem
         g = self._group_by_name.get(gname)
-        if not g: return
+        if not g:
+            return
         for d in g.Definitions:
             try:
                 if isinstance(d, ExternalDefinition):
                     self.lbParams.Items.Add(d.Name)
-            except: pass
+            except Exception as e:
+                logger.debug(u'Ошибка при чтении определения параметра: {}'.format(e))
 
     def _add_to_queue(self, sender, args):
         if self.lbParams.SelectedItems is None or self.lbParams.SelectedItems.Count == 0:
@@ -583,13 +536,13 @@ class MainController(object):
         if not items:
             forms.alert(u'Очередь пуста — сохранять нечего.')
             return
-        ofd = OpenFileDialog()
-        ofd.Title = u'Сохранить набор параметров (JSON)'
-        ofd.Filter = 'JSON (*.json)|*.json'
-        ofd.FileName = 'paramset.json'
-        if ofd.ShowDialog() == DialogResult.OK:
+        sfd = SaveFileDialog()
+        sfd.Title = u'Сохранить набор параметров (JSON)'
+        sfd.Filter = 'JSON (*.json)|*.json'
+        sfd.FileName = 'paramset.json'
+        if sfd.ShowDialog() == DialogResult.OK:
             try:
-                with open(ofd.FileName, 'wb') as fp:
+                with open(sfd.FileName, 'wb') as fp:
                     fp.write(json.dumps(items, indent=2, ensure_ascii=False).encode('utf-8'))
             except Exception as e:
                 forms.alert(u'Не удалось сохранить файл:\n{}'.format(e))
@@ -600,16 +553,17 @@ class MainController(object):
         ofd.Filter = 'JSON (*.json)|*.json|All files (*.*)|*.*'
         if ofd.ShowDialog() == DialogResult.OK:
             try:
-                raw = open(ofd.FileName,'rb').read()
+                raw = open(ofd.FileName, 'rb').read()
                 try:
                     data = json.loads(raw)
-                except:
+                except (ValueError, UnicodeDecodeError):
                     data = json.loads(raw.decode('utf-8'))
                 self._queue.Clear()
                 for d in data:
                     qi = QueueItem.from_json(d)
                     self._queue.Add(qi)
             except Exception as e:
+                logger.error(u'Ошибка загрузки файла {}: {}'.format(ofd.FileName, e))
                 forms.alert(u'Не удалось открыть файл:\n{}'.format(e))
 
     def _on_cancel(self, s, a):
@@ -631,7 +585,8 @@ class MainController(object):
                 try:
                     if d.IsFamilyDocument:
                         docs.append(d)
-                except: pass
+                except Exception as e:
+                    logger.debug(u'Пропущен документ: {}'.format(e))
             if not docs:
                 forms.alert(u'Открытых семейств не найдено.')
             return docs
@@ -655,15 +610,19 @@ class MainController(object):
         return []
 
     def _resolve_extdef_by_guid(self, guid_str):
+        """Найти определение параметра по GUID."""
         try:
             g = Guid(guid_str)
-        except: return None
+        except Exception:
+            logger.debug(u'Некорректный GUID: {}'.format(guid_str))
+            return None
         for grp in self._dfile.Groups:
             for d in grp.Definitions:
                 try:
                     if isinstance(d, ExternalDefinition) and str(d.GUID) == str(g):
                         return d
-                except: pass
+                except Exception as e:
+                    logger.debug(u'Ошибка при сравнении GUID: {}'.format(e))
         return None
 
     def _run(self, sender, args):
@@ -672,7 +631,8 @@ class MainController(object):
             from System.Windows.Controls import DataGridEditingUnit
             self.dgQueue.CommitEdit(DataGridEditingUnit.Cell, True)
             self.dgQueue.CommitEdit(DataGridEditingUnit.Row, True)
-        except: pass
+        except Exception as e:
+            logger.debug(u'Не удалось зафиксировать правки таблицы: {}'.format(e))
 
         items = list(self._queue)
         if not items:
@@ -685,8 +645,10 @@ class MainController(object):
         total_added = 0
         total_skipped = 0
         total_errors = 0
-        try: output.activate()
-        except: pass
+        try:
+            output.activate()
+        except Exception:
+            pass  # Окно вывода может быть недоступно
         print(u'Начинаем добавление параметров...')
         for d in docs:
             print(u'\nСемейство: {}'.format(d.Title))
