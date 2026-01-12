@@ -4,7 +4,7 @@
 Скрипт автоматического обновления PyRevit extension WW.BIM из GitHub репозитория без использования version.txt.
 
 ## Репозиторий
-- **GitHub:** https://github.com/sezif5/WW.BIM
+- **GitHub:** https://github.com/sezif5/WWBIM.extension
 - **Ветка:** main (с автоматическим fallback на master)
 
 ## Файлы
@@ -34,10 +34,10 @@ WW.BIM.extension/
 
 **Примечание:** `last_update.txt` создается автоматически при первом обновлении.
 
-### Настройки в скрипте (строки 22-24)
+### Настройки в скрипте (строки 22-25)
 ```python
 GITHUB_USER = "sezif5"
-GITHUB_REPO = "WW.BIM"
+GITHUB_REPO = "WWBIM.extension"
 BRANCH = "main"
 EXTENSION_NAME = "WW.BIM.extension"
 ```

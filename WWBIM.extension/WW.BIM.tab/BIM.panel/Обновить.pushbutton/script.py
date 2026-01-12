@@ -1,32 +1,50 @@
 # -*- coding: utf-8 -*-
-"""Обновить плагин WW.BIM из GitHub (без version.txt)"""
+"""Update WW.BIM plugin from GitHub (without version.txt)"""
 
-__title__ = "Обновить\nплагин"
+__title__ = "Update\nplugin"
 __author__ = "WW.BIM"
-__doc__ = "Скачивает последнюю версию плагина с GitHub"
+__doc__ = "Downloads latest plugin version from GitHub"
 
 import os
 import sys
 import shutil
 import zipfile
+import json
+import traceback
 from datetime import datetime
 
 from pyrevit import script, forms
 
-# Python 2/3 совместимость
-if sys.version_info[0] >= 3:
-    from urllib.request import urlretrieve, urlopen
-    from urllib.error import URLError
-else:
-    from urllib import urlretrieve
-    from urllib2 import urlopen, URLError
+try:
+    from System.Net import WebClient, ServicePointManager, SecurityProtocolType
 
-# ============ НАСТРОЙКИ ============
+    ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12
+except Exception:
+    WebClient = None
+
 GITHUB_USER = "sezif5"
-GITHUB_REPO = "WW.BIM"
+GITHUB_REPO = "WWBIM.extension"
 BRANCH = "main"
 EXTENSION_NAME = "WW.BIM.extension"
-# ===================================
+
+
+def http_get_text(url):
+    if WebClient is None:
+        return None
+
+    client = WebClient()
+    client.Headers.Add("User-Agent", "WW.BIM-Update/1.0")
+    return client.DownloadString(url)
+
+
+def http_download_file(url, path):
+    if WebClient is None:
+        return False
+
+    client = WebClient()
+    client.Headers.Add("User-Agent", "WW.BIM-Update/1.0")
+    client.DownloadFile(url, path)
+    return True
 
 
 def get_extension_path():
@@ -45,7 +63,6 @@ def get_extension_path():
 
 
 def get_local_last_update(ext_path):
-    """Читаем дату последнего обновления из last_update.txt"""
     last_update_file = os.path.join(ext_path, "last_update.txt")
     if os.path.exists(last_update_file):
         with open(last_update_file, "r") as f:
@@ -54,23 +71,23 @@ def get_local_last_update(ext_path):
 
 
 def get_remote_commit_date():
-    """Получаем дату последнего коммита из GitHub API"""
-    url = "https://api.github.com/repos/{}/{}/commits/{}".format(
-        GITHUB_USER, GITHUB_REPO, BRANCH
-    )
-    try:
-        response = urlopen(url, timeout=10)
-        import json
-
-        data = json.loads(response.read().decode("utf-8"))
-        commit_date = data["commit"]["committer"]["date"]
-        return commit_date
-    except:
-        return None
+    for branch in [BRANCH, "master", "main"]:
+        url = "https://api.github.com/repos/{}/{}/commits/{}".format(
+            GITHUB_USER, GITHUB_REPO, branch
+        )
+        try:
+            response_text = http_get_text(url)
+            if not response_text:
+                continue
+            data = json.loads(response_text)
+            commit_date = data["commit"]["committer"]["date"]
+            return commit_date
+        except Exception:
+            continue
+    return None
 
 
 def compare_dates(remote_date, local_date):
-    """Сравниваем даты - возвращает True если remote новее"""
     if not local_date:
         return True
 
@@ -83,15 +100,33 @@ def compare_dates(remote_date, local_date):
 
 
 def save_last_update(ext_path, date):
-    """Сохраняем дату последнего обновления"""
     last_update_file = os.path.join(ext_path, "last_update.txt")
     with open(last_update_file, "w") as f:
         f.write(date)
 
 
+def get_temp_dir():
+    system_drive = os.environ.get("SystemDrive", "C:\\")
+    if sys.platform.startswith("win"):
+        temp_dir = os.path.join(system_drive, "WWBIM_TMP")
+    else:
+        temp_dir = "/tmp/wwbim_update"
+
+    try:
+        if not os.path.exists(temp_dir):
+            os.makedirs(temp_dir)
+    except Exception:
+        pass
+
+    return temp_dir
+
+
 def download_update(ext_path):
-    """Скачиваем и устанавливаем обновление"""
-    temp_dir = os.environ.get("TEMP", os.environ.get("TMP", "/tmp"))
+    temp_dir = get_temp_dir()
+
+    if not os.path.exists(temp_dir):
+        return False, "Temp directory does not exist"
+
     zip_path = os.path.join(temp_dir, "wwbim_update.zip")
     extract_path = os.path.join(temp_dir, "wwbim_update")
 
@@ -100,13 +135,13 @@ def download_update(ext_path):
             GITHUB_USER, GITHUB_REPO, branch
         )
         try:
-            urlretrieve(zip_url, zip_path)
-            used_branch = branch
-            break
-        except:
+            if http_download_file(zip_url, zip_path):
+                used_branch = branch
+                break
+        except Exception:
             continue
     else:
-        return False, "Не удалось скачать обновление. Проверьте интернет."
+        return False, "Failed to download. Check internet connection."
 
     try:
         if os.path.exists(extract_path):
@@ -156,7 +191,7 @@ def download_update(ext_path):
                 else:
                     shutil.copy2(src, dst)
             except Exception as e:
-                print("Не удалось скопировать {}: {}".format(item, e))
+                pass
 
         try:
             os.remove(zip_path)
@@ -164,81 +199,81 @@ def download_update(ext_path):
         except:
             pass
 
-        return True, "Обновление успешно установлено!"
+        return True, "Update installed successfully!"
 
     except Exception as e:
-        return False, "Ошибка при установке: {}".format(str(e))
+        return False, "Installation error: {}".format(str(e))
 
 
-def force_update(ext_path):
-    with forms.ProgressBar(title="Скачивание обновления...") as pb:
-        pb.update_progress(20, 100)
-        success, message = download_update(ext_path)
-        pb.update_progress(100, 100)
-    return success, message
-
-
-# ============ ГЛАВНЫЙ КОД ============
-if __name__ == "__main__":
+def main():
     ext_path = get_extension_path()
 
     if not ext_path:
-        ext_path = forms.pick_folder(title="Выберите папку плагина (.extension)")
+        ext_path = forms.pick_folder(title="Select plugin folder (.extension)")
         if not ext_path:
-            forms.alert("Путь к плагину не выбран", exitscript=True)
+            script.exit()
+
+    if WebClient is None:
+        forms.alert("WebClient not available. Update aborted.", warn_icon=True)
+        script.exit()
 
     local_date = get_local_last_update(ext_path)
     remote_date = get_remote_commit_date()
 
     if not remote_date:
         if forms.alert(
-            "Не удалось проверить дату коммита на сервере.\n\n"
-            "Последнее обновление: {}\n\n"
-            "Выполнить принудительное обновление?".format(local_date or "неизвестно"),
+            "Failed to check commit date on server.\n\n"
+            "Last update: {}\n\n"
+            "Force update?".format(local_date or "unknown"),
             yes=True,
             no=True,
         ):
-            success, message = force_update(ext_path)
+            success, message = download_update(ext_path)
             if success:
                 remote_date = get_remote_commit_date()
                 if remote_date:
                     save_last_update(ext_path, remote_date)
-                forms.alert(
-                    "{}\n\nПерезапустите Revit для применения изменений.".format(
-                        message
-                    )
-                )
+                forms.alert("{}\n\nRestart Revit to apply changes.".format(message))
             else:
                 forms.alert(message, warn_icon=True)
-        sys.exit()
+        script.exit()
 
     if not compare_dates(remote_date, local_date):
         result = forms.alert(
-            "У вас актуальная версия\n\n"
-            "Последнее обновление: {}\n\n"
-            "Выполнить принудительное обновление?".format(local_date or "неизвестно"),
+            "You have the latest version\n\nLast update: {}\n\nForce update?".format(
+                local_date or "unknown"
+            ),
             yes=True,
             no=True,
         )
         if not result:
-            sys.exit()
+            script.exit()
     else:
         result = forms.alert(
-            "Доступно обновление!\n\n"
-            "Дата последнего коммита: {}\n\n"
-            "Установить обновление?".format(remote_date),
+            "Update available!\n\nLatest commit date: {}\n\nInstall update?".format(
+                remote_date
+            ),
             yes=True,
             no=True,
         )
         if not result:
-            sys.exit()
+            script.exit()
 
-    success, message = force_update(ext_path)
+    success, message = download_update(ext_path)
 
     if success:
         save_last_update(ext_path, remote_date)
-        forms.alert(
-            "{}\n\nПерезапустите Revit для применения изменений.".format(message)
-        )
+        forms.alert("{}\n\nRestart Revit to apply changes.".format(message))
     else:
         forms.alert(message, warn_icon=True)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception:
+        forms.alert(
+            "Update failed.\n\n{}".format(traceback.format_exc()),
+            warn_icon=True,
+        )
+        script.exit()
