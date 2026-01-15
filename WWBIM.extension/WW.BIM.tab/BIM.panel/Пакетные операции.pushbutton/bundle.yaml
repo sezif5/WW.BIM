@@ -1,0 +1,17 @@
+title:
+  ru: "Пакетные\nоперации"
+  en_us: "Batch\nOperations"
+
+tooltip:
+  ru: >-
+    Пакетные операции с моделями: Открыть, Загрузить семейство (из открытых), Добавить связь.
+    Выбор объекта из txt файлов, затем выбор моделей из списка.
+  en_us: >-
+    Batch operations with models: Open, Load family (from open), Add link.
+    Select object from txt files, then select models from list.
+
+author: Vlad
+help_url: ""
+
+min_revit_version: 2020
+max_revit_version: 2025

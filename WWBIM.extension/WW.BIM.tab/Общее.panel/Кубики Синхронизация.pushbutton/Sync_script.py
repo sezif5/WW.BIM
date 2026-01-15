@@ -82,14 +82,46 @@ def get_param_value_string(elem, param_name):
     return get_param_value(elem, param_name)
 
 
-def set_param_value(elem, param_name, value):
-    """Установить значение параметра."""
+def get_param_info(elem, param_name):
+    """Получить информацию о параметре для диагностики."""
     p = elem.LookupParameter(param_name)
-    if p is None or p.IsReadOnly:
-        return False
+    if p is None:
+        return None
+
+    info = {
+        'exists': True,
+        'is_readonly': p.IsReadOnly,
+        'storage_type': str(p.StorageType),
+        'is_shared': p.IsShared,
+    }
+
+    try:
+        info['definition_name'] = p.Definition.Name
+    except:
+        info['definition_name'] = u"?"
+
+    try:
+        # Проверяем, это параметр типа или экземпляра
+        info['is_type_param'] = False
+        if hasattr(p.Definition, 'ParameterGroup'):
+            info['param_group'] = str(p.Definition.ParameterGroup)
+    except:
+        pass
+
+    return info
+
+
+def set_param_value(elem, param_name, value):
+    """Установить значение параметра. Возвращает (success, error_msg)."""
+    p = elem.LookupParameter(param_name)
+    if p is None:
+        return False, u"параметр не найден"
+
+    if p.IsReadOnly:
+        return False, u"только для чтения"
 
     if value is None:
-        return False
+        return False, u"значение None"
 
     st = p.StorageType
     try:
@@ -101,9 +133,9 @@ def set_param_value(elem, param_name, value):
             p.Set(float(value))
         elif st == DB.StorageType.ElementId:
             p.Set(DB.ElementId(int(value)))
-        return True
-    except:
-        return False
+        return True, None
+    except Exception as ex:
+        return False, unicode(ex)
 
 
 def find_link_with_openings(doc):
@@ -145,35 +177,134 @@ def get_generic_models_from_doc(doc):
     return list(collector)
 
 
-def build_kubik_dict(elements, param_name):
-    """Построить словарь {номер_кубика: элемент}."""
+def is_empty_kubik_number(val):
+    """Проверить, является ли номер кубика пустым или нулевым."""
+    if val is None:
+        return True
+    if isinstance(val, (int, float)) and val == 0:
+        return True
+    if isinstance(val, str):
+        s = val.strip()
+        if s == "" or s == "0":
+            return True
+    try:
+        s = unicode(val).strip()
+        if s == "" or s == "0":
+            return True
+    except:
+        pass
+    return False
+
+
+def build_kubik_dict(elements, param_name, track_empty=False):
+    """Построить словарь {номер_кубика: элемент}.
+    Возвращает (dict, duplicates, empty_ids) где:
+        duplicates = {номер: [список elem_id]}
+        empty_ids = [список elem_id без номера или с номером 0] (только если track_empty=True)
+    """
     result = {}
+    duplicates = {}  # {номер: [elem_id1, elem_id2, ...]}
+    empty_ids = []  # элементы без заполненного номера или с 0
+
     for elem in elements:
         val = get_param_value(elem, param_name)
-        if val is not None and val != u"" and val != "":
-            key = unicode(val).strip()
-            if key:
+
+        if is_empty_kubik_number(val):
+            # Пустой номер или 0
+            if track_empty:
+                empty_ids.append(elem.Id)
+            continue
+
+        key = unicode(val).strip()
+        if key:
+            if key in result:
+                # Дубликат!
+                if key not in duplicates:
+                    # Первый дубликат - добавляем оригинал тоже
+                    duplicates[key] = [result[key].Id]
+                duplicates[key].append(elem.Id)
+            else:
                 result[key] = elem
-    return result
+
+    return result, duplicates, empty_ids
+
+
+def normalize_value(val):
+    """Нормализовать значение для сравнения."""
+    if val is None:
+        return u""
+    if isinstance(val, bool):
+        return 1 if val else 0
+    if isinstance(val, (int, float)):
+        return val
+    # Строки - приводим к unicode и убираем пробелы
+    try:
+        s = unicode(val).strip()
+        return s
+    except:
+        return val
+
+
+def values_equal(val1, val2):
+    """Сравнить два значения с учётом типов."""
+    if val1 == val2:
+        return True
+
+    n1 = normalize_value(val1)
+    n2 = normalize_value(val2)
+
+    if n1 == n2:
+        return True
+
+    # Сравнение чисел с погрешностью
+    try:
+        if isinstance(n1, (int, float)) and isinstance(n2, (int, float)):
+            return abs(float(n1) - float(n2)) < 0.0001
+    except:
+        pass
+
+    # Последняя попытка - сравнение как строки
+    try:
+        if unicode(n1) == unicode(n2):
+            return True
+    except:
+        pass
+
+    return False
 
 
 def sync_parameters(source_elem, target_elem, param_names):
     """Синхронизировать параметры от источника к цели.
-    Возвращает список кортежей: (param_name, old_value, new_value, old_display, new_display)
+    Возвращает:
+        synced - список успешных: (param_name, old_display, new_display)
+        errors - список ошибок: (param_name, error_msg)
     """
     synced = []
+    errors = []
+
     for pname in param_names:
         src_val = get_param_value(source_elem, pname)
-        if src_val is not None:
-            tgt_val = get_param_value(target_elem, pname)
-            # Синхронизируем только если значения отличаются
-            if src_val != tgt_val:
-                # Получаем отображаемые значения для отчёта
-                src_display = get_param_value_string(source_elem, pname)
-                tgt_display = get_param_value_string(target_elem, pname)
-                if set_param_value(target_elem, pname, src_val):
-                    synced.append((pname, tgt_val, src_val, tgt_display, src_display))
-    return synced
+
+        # Пропускаем если параметра нет в источнике
+        if src_val is None:
+            continue
+
+        tgt_val = get_param_value(target_elem, pname)
+
+        # Синхронизируем только если значения отличаются
+        if not values_equal(src_val, tgt_val):
+            # Получаем отображаемые значения для отчёта
+            src_display = get_param_value_string(source_elem, pname)
+            tgt_display = get_param_value_string(target_elem, pname)
+
+            success, error_msg = set_param_value(target_elem, pname, src_val)
+
+            if success:
+                synced.append((pname, tgt_display, src_display))
+            else:
+                errors.append((pname, error_msg))
+
+    return synced, errors
 
 
 def main():
@@ -241,8 +372,8 @@ def main():
         return
 
     # 3. Построить словари по номеру кубика
-    link_dict = build_kubik_dict(link_kubiks, MATCH_PARAM)
-    doc_dict = build_kubik_dict(doc_kubiks, MATCH_PARAM)
+    link_dict, _, _ = build_kubik_dict(link_kubiks, MATCH_PARAM, track_empty=False)
+    doc_dict, doc_duplicates, doc_empty_ids = build_kubik_dict(doc_kubiks, MATCH_PARAM, track_empty=True)
 
     if not link_dict:
         forms.alert(
@@ -267,8 +398,9 @@ def main():
     not_found_in_link = []
 
     # Детальная информация об изменениях
-    # {kubik_num: [(param_name, old_val, new_val, old_display, new_display), ...]}
     changes_log = {}
+    # Ошибки синхронизации
+    errors_log = {}
 
     t = DB.Transaction(doc, u"Синхронизация параметров кубиков")
     t.Start()
@@ -278,13 +410,20 @@ def main():
             if kubik_num in link_dict:
                 matched += 1
                 link_elem = link_dict[kubik_num]
-                synced = sync_parameters(link_elem, doc_elem, SYNC_PARAMS)
+                synced, errors = sync_parameters(link_elem, doc_elem, SYNC_PARAMS)
+
                 if synced:
                     updated += 1
                     params_updated += len(synced)
                     changes_log[kubik_num] = {
                         'elem_id': doc_elem.Id.IntegerValue,
                         'changes': synced
+                    }
+
+                if errors:
+                    errors_log[kubik_num] = {
+                        'elem_id': doc_elem.Id.IntegerValue,
+                        'errors': errors
                     }
             else:
                 not_found_in_link.append(kubik_num)
@@ -307,11 +446,15 @@ def main():
     output.print_md(u"## Статистика")
     output.print_md(u"| Показатель | Значение |")
     output.print_md(u"|------------|----------|")
-    output.print_md(u"| Кубиков в связи | {} |".format(len(link_dict)))
-    output.print_md(u"| Кубиков в документе | {} |".format(len(doc_dict)))
+    output.print_md(u"| Кубиков в связи (уникальных) | {} |".format(len(link_dict)))
+    output.print_md(u"| Кубиков в документе (уникальных) | {} |".format(len(doc_dict)))
     output.print_md(u"| Сопоставлено | {} |".format(matched))
     output.print_md(u"| Обновлено кубиков | {} |".format(updated))
     output.print_md(u"| Обновлено параметров | {} |".format(params_updated))
+    if doc_duplicates:
+        output.print_md(u"| **ДУБЛИКАТЫ номеров** | **{}** |".format(len(doc_duplicates)))
+    if doc_empty_ids:
+        output.print_md(u"| **БЕЗ НОМЕРА** | **{}** |".format(len(doc_empty_ids)))
 
     # Детали изменений
     if changes_log:
@@ -328,15 +471,58 @@ def main():
             output.print_md(u"|----------|------|-------|")
 
             for change in changes:
-                pname, old_val, new_val, old_display, new_display = change
-                old_str = format_value(old_display if old_display else old_val)
-                new_str = format_value(new_display if new_display else new_val)
+                pname, old_display, new_display = change
+                old_str = format_value(old_display)
+                new_str = format_value(new_display)
                 output.print_md(u"| {} | {} | {} |".format(pname, old_str, new_str))
 
             output.print_md(u"")
     else:
         output.print_md(u"---")
         output.print_md(u"*Изменений не обнаружено - все параметры уже синхронизированы.*")
+
+    # Ошибки синхронизации
+    if errors_log:
+        output.print_md(u"---")
+        output.print_md(u"## Ошибки синхронизации")
+        output.print_md(u"")
+
+        for kubik_num, data in sorted(errors_log.items()):
+            elem_id = data['elem_id']
+            errs = data['errors']
+
+            output.print_md(u"### Кубик: {} (ID: {})".format(kubik_num, elem_id))
+            output.print_md(u"| Параметр | Ошибка |")
+            output.print_md(u"|----------|--------|")
+
+            for err in errs:
+                pname, error_msg = err
+                output.print_md(u"| {} | {} |".format(pname, error_msg))
+
+            output.print_md(u"")
+
+    # Кубики без номера или с номером 0
+    if doc_empty_ids:
+        output.print_md(u"---")
+        output.print_md(u"## ⚠️ КУБИКИ БЕЗ НОМЕРА ({})".format(len(doc_empty_ids)))
+        output.print_md(u"У этих кубиков параметр '{}' пустой или равен 0. Они не синхронизированы.".format(MATCH_PARAM))
+        output.print_md(u"")
+        for elem_id in doc_empty_ids[:50]:
+            output.print_md(u"- {}".format(output.linkify(elem_id)))
+        if len(doc_empty_ids) > 50:
+            output.print_md(u"- *... и ещё {}*".format(len(doc_empty_ids) - 50))
+        output.print_md(u"")
+
+    # Дубликаты в документе
+    if doc_duplicates:
+        output.print_md(u"---")
+        output.print_md(u"## ⚠️ ДУБЛИКАТЫ НОМЕРОВ ({})".format(len(doc_duplicates)))
+        output.print_md(u"Несколько кубиков имеют одинаковый номер! Синхронизирован только первый.")
+        output.print_md(u"")
+        for num, ids in sorted(doc_duplicates.items()):
+            links = [output.linkify(eid) for eid in ids]
+            output.print_md(u"**{}**: {}".format(num, u", ".join(links)))
+        output.print_md(u"")
 
     # Не найденные в связи
     if not_found_in_link:
