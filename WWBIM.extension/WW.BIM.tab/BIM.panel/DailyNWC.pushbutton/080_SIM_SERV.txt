@@ -1,0 +1,16 @@
+rsn:\\revit-srv-02\SIMV_32-35\01_Arch\FACADE\080_SIYA_P02_3A-32_FC_AR_R22.rvt
+rsn:\\revit-srv-02\SIMV_32-35\01_Arch\FACADE\080_SIYA_P02_3A-33_FC_AR_R22.rvt
+rsn:\\revit-srv-02\SIMV_32-35\01_Arch\FACADE\080_SIYA_P02_3A-34_FC_HAB_AR_R22.rvt
+rsn:\\revit-srv-02\SIMV_32-35\01_Arch\FACADE\080_SIYA_P02_3A-35_FC_HAB_AR_R22.rvt
+
+rsn:\\revit-srv-02\SIMV_32-35\01_Arch\UPPER\080_SIYA_P02_3A-32_AR_R22.rvt
+rsn:\\revit-srv-02\SIMV_32-35\01_Arch\UPPER\080_SIYA_P02_3A-33_AR_R22.rvt
+
+rsn:\\revit-srv-02\SIMV_32-35\01_Arch\PARKING\080_SIYA_P01_3A-Parking_AR_R22.rvt
+
+rsn:\\revit-srv-02\SIMV_32-35\02_Str\080_SIYA_P01_3A-Parking_KG_R22.rvt
+rsn:\\revit-srv-02\SIMV_32-35\02_Str\080_SIYA_P02_3A-33_KG_R22.rvt
+rsn:\\revit-srv-02\SIMV_32-35\02_Str\080_SIYA_P01_3A-34_KG0_R22.rvt
+rsn:\\revit-srv-02\SIMV_32-35\02_Str\080_SIYA_P01_3A-35_KG0_R22.rvt
+
+rsn:\\revit-srv-02\SIMV_32-35\04_Coordination\080_SIYA_CR_R22.rvt

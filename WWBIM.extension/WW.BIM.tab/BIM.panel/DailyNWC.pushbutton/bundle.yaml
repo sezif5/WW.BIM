@@ -5,7 +5,8 @@ title:
 tooltip:
   ru: >-
     Ежедневный экспорт RVT в NWC с проверкой актуальности.
-    Автоматический запуск через Windows Scheduled Task.
+    Поддерживает три режима: ручной экспорт, автозапуск через Scheduled Task и долгоживущая служба.
+    Экспорт через ExternalEvent с проверкой IsModified и os.path.getmtime.
     Выбор объектов и папок NWC через txt файлы в папке Object.
 
 author: Vlad

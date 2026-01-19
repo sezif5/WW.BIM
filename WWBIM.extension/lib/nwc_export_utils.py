@@ -31,6 +31,7 @@ from System.Collections.Generic import List
 import openbg
 import closebg
 
+
 # ---------- helpers ----------
 
 
@@ -42,6 +43,18 @@ def to_model_path(user_visible_path):
         return ModelPathUtils.ConvertUserVisiblePathToModelPath(user_visible_path)
     except Exception:
         return None
+
+
+def default_export_root():
+    """Возвращает папку по умолчанию для экспорта NWC."""
+    docs = os.path.join(os.path.expanduser("~"), "Documents")
+    root = os.path.join(docs, "NWC_Export")
+    if not os.path.exists(root):
+        try:
+            os.makedirs(root)
+        except Exception:
+            pass
+    return root
 
 
 # ---- SAFE BIC helpers (без getattr к BuiltInCategory) ----
@@ -265,27 +278,36 @@ def count_visible_elements(doc, view):
 
 
 def export_view_to_nwc(doc, view, target_folder, file_wo_ext):
-    """Экспорт указанного вида в .nwc. Возвращает (api_ok, out_path)."""
+    """Экспорт указанного вида в .nwc. Возвращает (api_ok, out_path, error_msg)."""
+    if not target_folder or not file_wo_ext:
+        return False, None, "Invalid parameters"
+
     if not os.path.exists(target_folder):
         try:
             os.makedirs(target_folder)
-        except Exception:
-            pass
+        except Exception as e:
+            return False, None, "Failed to create folder: {}".format(str(e))
+
     opts = NavisworksExportOptions()
     opts.ExportScope = NavisworksExportScope.View
     opts.ViewId = view.Id
     api_ok = False
+    out_path = None
+    error_msg = None
     try:
         api_ok = doc.Export(target_folder, file_wo_ext, opts)
-    except Exception:
+    except Exception as e:
+        error_msg = str(e)
         api_ok = False
-    out_path = os.path.join(target_folder, file_wo_ext + ".nwc")
-    return api_ok, out_path
+    if target_folder and file_wo_ext:
+        out_path = os.path.join(target_folder, file_wo_ext + ".nwc")
+    return api_ok, out_path, error_msg
 
 
 def workset_filter(ws_name):
-    """Предикат для фильтрации рабочих наборов при открытии."""
-    """Возвращает True, если рабочий набор нужно открыть"""
+    """Предикат для фильтрации рабочих наборов при открытии.
+    Возвращает True, если рабочий набор нужно открыть.
+    """
     name = (ws_name or "").strip()
     # Исключаем: начинающиеся с '00_'
     if name.startswith("00_"):
@@ -297,9 +319,39 @@ def workset_filter(ws_name):
     return True
 
 
-def export_rvt_to_nwc_full(rvt_path, nwc_folder, object_name, app, revit):
+def determine_nwc_filename(rvt_path, nwc_folder):
     """
-    Полный цикл экспорта RVT файла в NWC.
+    Определяет имя NWC файла для экспорта.
+
+    Логика:
+    - Если RVT имеет суффикс _RXX, проверяем наличие NWC с _NXX
+    - Если NWC с _NXX существует - используем тот же суффикс
+    - Иначе используем стандартное имя RVT файла
+
+    Возвращает имя файла без расширения (например, "Файл" или "Файл_N22")
+    """
+    import re
+
+    rvt_filename = os.path.splitext(os.path.basename(rvt_path))[0]
+
+    match = re.search(r"_R(\d+)$", rvt_filename)
+    if match:
+        suffix = match.group(0)
+        version_num = match.group(1)
+        new_version_num = str(int(version_num) + 1)
+        new_suffix = "_N" + new_version_num
+        nwc_filename = rvt_filename.replace(suffix, new_suffix)
+        nwc_path = os.path.join(nwc_folder, nwc_filename + ".nwc")
+
+        if os.path.exists(nwc_path):
+            return nwc_filename
+
+    return rvt_filename
+
+
+def export_rvt_to_nwc(rvt_path, nwc_folder, app, revit):
+    """
+    Экспорт RVT файла в NWC.
 
     Возвращает словарь с результатами:
     {
@@ -309,10 +361,16 @@ def export_rvt_to_nwc_full(rvt_path, nwc_folder, object_name, app, revit):
         'errors_count': int,
         'warnings': list,
         'errors': list,
+        'dialogs_count': int,
+        'dialogs': list,
         'exported_file': str or None,
         'file_size_mb': float or None,
         'time_open': str,
-        'time_export': str
+        'time_export': str,
+        'vis_count': int or None,
+        'import_count': int or None,
+        'view_name': str or None,
+        'view_created': bool
     }
     """
     result = {
@@ -322,10 +380,16 @@ def export_rvt_to_nwc_full(rvt_path, nwc_folder, object_name, app, revit):
         "errors_count": 0,
         "warnings": [],
         "errors": [],
+        "dialogs_count": 0,
+        "dialogs": [],
         "exported_file": None,
         "file_size_mb": None,
         "time_open": None,
         "time_export": None,
+        "vis_count": None,
+        "import_count": None,
+        "view_name": None,
+        "view_created": False,
     }
 
     mp = to_model_path(rvt_path)
@@ -343,8 +407,8 @@ def export_rvt_to_nwc_full(rvt_path, nwc_folder, object_name, app, revit):
             mp,
             audit=False,
             worksets=("predicate", workset_filter),
-            detach=True,  # Отсоединить с сохранением рабочих наборов
-            suppress_dialogs=True,  # Подавлять диалоговые окна (TaskDialog)
+            detach=True,
+            suppress_dialogs=True,
         )
     except Exception as e:
         result["error"] = "Ошибка открытия: {}".format(e)
@@ -359,17 +423,18 @@ def export_rvt_to_nwc_full(rvt_path, nwc_folder, object_name, app, revit):
             summary = failure_handler.get_summary()
             result["warnings_count"] = summary.get("total_warnings", 0)
             result["errors_count"] = summary.get("total_errors", 0)
-            result["warnings"] = summary.get("warnings", [])[:5]  # первые 5
-            result["errors"] = summary.get("errors", [])[:3]  # первые 3
+            result["warnings"] = summary.get("warnings", [])[:5]
+            result["errors"] = summary.get("errors", [])[:3]
         except Exception:
             pass
 
     # Вид Navisworks
     try:
         view, created = find_or_create_navis_view(doc)
+        result["view_name"] = view.Name
+        result["view_created"] = created
     except Exception as e:
         result["error"] = "Ошибка подготовки вида 'Navisworks': {}".format(e)
-        # Отключаем подавитель диалогов
         if dialog_suppressor is not None:
             try:
                 dialog_suppressor.detach()
@@ -387,7 +452,19 @@ def export_rvt_to_nwc_full(rvt_path, nwc_folder, object_name, app, revit):
     except Exception:
         pass
 
+    # Подсчет ImportInstance в виде
+    try:
+        import_count = (
+            FilteredElementCollector(doc, view.Id)
+            .OfClass(ImportInstance)
+            .GetElementCount()
+        )
+        result["import_count"] = import_count
+    except Exception:
+        pass
+
     vis_count = count_visible_elements(doc, view)
+    result["vis_count"] = vis_count
 
     # Экспорт
     t_exp = coreutils.Timer()
@@ -395,18 +472,25 @@ def export_rvt_to_nwc_full(rvt_path, nwc_folder, object_name, app, revit):
     err_text = None
     try:
         if vis_count > 0:
-            file_wo_ext = os.path.splitext(os.path.basename(rvt_path))[0]
-            api_ok, out_path = export_view_to_nwc(doc, nwc_folder, file_wo_ext)
+            file_wo_ext = determine_nwc_filename(rvt_path, nwc_folder)
+            api_ok, out_path, export_err = export_view_to_nwc(
+                doc, view, nwc_folder, file_wo_ext
+            )
+            if export_err:
+                err_text = export_err
         else:
             err_text = "Вид не имеет элементов."
     except Exception as e:
         err_text = str(e)
 
-    file_ok = os.path.exists(out_path) and (os.path.getsize(out_path) > 0)
+    file_ok = False
+    if out_path and os.path.exists(out_path):
+        file_ok = os.path.getsize(out_path) > 0
+
     ok = (api_ok or file_ok) and (err_text is None)
     exp_s = str(datetime.timedelta(seconds=int(t_exp.get_time())))
 
-    if file_ok:
+    if file_ok and out_path:
         try:
             result["exported_file"] = out_path
             result["file_size_mb"] = os.path.getsize(out_path) / (1024 * 1024)
@@ -419,8 +503,14 @@ def export_rvt_to_nwc_full(rvt_path, nwc_folder, object_name, app, revit):
     except Exception:
         pass
 
-    # Отключаем подавитель диалогов и выводим информацию о подавленных диалогах
+    # Информация о подавленных диалогах
     if dialog_suppressor is not None:
+        try:
+            dialog_summary = dialog_suppressor.get_summary()
+            result["dialogs_count"] = dialog_summary.get("total_dialogs", 0)
+            result["dialogs"] = dialog_summary.get("dialogs", [])[:5]
+        except Exception:
+            pass
         try:
             dialog_suppressor.detach()
         except Exception:

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-__title__  = "Экспорт NWC"
+__title__ = "Экспорт NWC"
 __author__ = "vlad / you"
-__doc__    = "Экспорт .nwc в выбранную папку (без создания подпапок). Открытие РН через openbg: все, кроме начинающихся с '00_' и содержащих 'Link'/'Связь'. Совместимость Revit 2022/2023."
+__doc__ = "Экспорт .nwc в выбранную папку (без создания подпапок). Открытие РН через openbg: все, кроме начинающихся с '00_' и содержащих 'Link'/'Связь'. Совместимость Revit 2022/2023."
 
 import os
 import datetime
@@ -9,10 +9,20 @@ from pyrevit import script, coreutils, forms
 
 # Revit API
 from Autodesk.Revit.DB import (
-    ModelPathUtils, View3D, ViewFamilyType, ViewFamily,
-    FilteredElementCollector, CategoryType, BuiltInCategory, BuiltInParameter,
-    Transaction, NavisworksExportOptions, NavisworksExportScope,
-    Category, ElementId, ImportInstance
+    ModelPathUtils,
+    View3D,
+    ViewFamilyType,
+    ViewFamily,
+    FilteredElementCollector,
+    CategoryType,
+    BuiltInCategory,
+    BuiltInParameter,
+    Transaction,
+    NavisworksExportOptions,
+    NavisworksExportScope,
+    Category,
+    ElementId,
+    ImportInstance,
 )
 from System import Enum
 from System.Collections.Generic import List
@@ -28,6 +38,7 @@ out.close_others(all_open_outputs=True)
 
 # ---------- helpers ----------
 
+
 def to_model_path(user_visible_path):
     if not user_visible_path:
         return None
@@ -36,22 +47,32 @@ def to_model_path(user_visible_path):
     except Exception:
         return None
 
+
 def default_export_root():
     docs = os.path.join(os.path.expanduser("~"), "Documents")
     root = os.path.join(docs, "NWC_Export")
     if not os.path.exists(root):
-        try: os.makedirs(root)
-        except Exception: pass
+        try:
+            os.makedirs(root)
+        except Exception:
+            pass
     return root
 
+
 def select_export_root():
-    folder = forms.pick_folder(title=u"Выберите папку, куда складывать NWC")
+    folder = forms.pick_folder(title="Выберите папку, куда складывать NWC")
     if not folder:
         folder = default_export_root()
-        out.print_md(u":information_source: Папка не выбрана. Используем по умолчанию: `{}`".format(folder))
+        out.print_md(
+            ":information_source: Папка не выбрана. Используем по умолчанию: `{}`".format(
+                folder
+            )
+        )
     return os.path.normpath(folder)
 
+
 # ---- SAFE BIC helpers (без getattr к BuiltInCategory) ----
+
 
 def _resolve_bic(name):
     """Вернуть BuiltInCategory по строке или None, если такого имени нет в текущей версии Revit."""
@@ -64,6 +85,7 @@ def _resolve_bic(name):
         pass
     return None
 
+
 def _resolve_bip(name):
     if not name:
         return None
@@ -73,6 +95,7 @@ def _resolve_bip(name):
     except Exception:
         pass
     return None
+
 
 def _try_set_bip_int(element, bip_name, value):
     bip = _resolve_bip(bip_name)
@@ -87,6 +110,7 @@ def _try_set_bip_int(element, bip_name, value):
         pass
     return False
 
+
 def _cat_id(doc, bic):
     if bic is None:
         return None
@@ -98,9 +122,10 @@ def _cat_id(doc, bic):
         return None
     return None
 
+
 def _hide_categories_by_names(doc, view, names):
     ids = List[ElementId]()
-    for nm in (names or []):
+    for nm in names or []:
         bic = _resolve_bic(nm)
         eid = _cat_id(doc, bic)
         if eid:
@@ -143,9 +168,10 @@ def _hide_categories_by_names(doc, view, names):
             hidden += 1
     return hidden
 
+
 def hide_annos_and_links_safe(view):
     doc = view.Document
-    
+
     # View template can lock Visibility/Graphics. Detach for this export session (doc is opened detached and not saved).
     try:
         vtid = getattr(view, "ViewTemplateId", None)
@@ -154,13 +180,25 @@ def hide_annos_and_links_safe(view):
     except Exception:
         pass
     names = [
-        'OST_RvtLinks', 'OST_LinkInstances',
+        "OST_RvtLinks",
+        "OST_LinkInstances",
         # Все варианты импорта (DWG, DXF и др.)
-        'OST_ExportLayer', 'OST_ImportInstance', 'OST_ImportsInFamilies',
-        'OST_ImportObjectStyles',  # Импорт в семействах (стили объектов)
-        'OST_Cameras', 'OST_Views', 'OST_Lines', 'OST_PointClouds', 'OST_PointCloudsHardware',
-        'OST_Levels', 'OST_Grids',
-        'OST_Annotations', 'OST_TitleBlocks', 'OST_Viewports', 'OST_TextNotes', 'OST_Dimensions'
+        "OST_ExportLayer",
+        "OST_ImportInstance",
+        "OST_ImportsInFamilies",
+        "OST_ImportObjectStyles",  # Импорт в семействах (стили объектов)
+        "OST_Cameras",
+        "OST_Views",
+        "OST_Lines",
+        "OST_PointClouds",
+        "OST_PointCloudsHardware",
+        "OST_Levels",
+        "OST_Grids",
+        "OST_Annotations",
+        "OST_TitleBlocks",
+        "OST_Viewports",
+        "OST_TextNotes",
+        "OST_Dimensions",
     ]
     hidden = _hide_categories_by_names(doc, view, names)
     # ВАЖНО: Отключаем чекбоксы "Показывать импортированные/аннотации на этом виде"
@@ -171,7 +209,7 @@ def hide_annos_and_links_safe(view):
         pass
     _try_set_bip_int(view, "VIEW_SHOW_IMPORT_CATEGORIES", 0)
     _try_set_bip_int(view, "VIEW_SHOW_IMPORT_CATEGORIES_IN_VIEW", 0)
-    
+
     try:
         # Скрыть все категории аннотаций (вкладка "Категории аннотаций")
         view.AreAnnotationCategoriesHidden = True
@@ -179,7 +217,7 @@ def hide_annos_and_links_safe(view):
         pass
     _try_set_bip_int(view, "VIEW_SHOW_ANNOTATION_CATEGORIES", 0)
     _try_set_bip_int(view, "VIEW_SHOW_ANNOTATION_CATEGORIES_IN_VIEW", 0)
-    
+
     # Extra safety: explicitly hide ImportInstance elements so they won't be exported even if category flags are blocked.
     try:
         ids = List[ElementId]()
@@ -193,8 +231,9 @@ def hide_annos_and_links_safe(view):
             view.HideElements(ids)
     except Exception:
         pass
-    
+
     return hidden
+
 
 def find_or_create_navis_view(doc):
     for v in FilteredElementCollector(doc).OfClass(View3D):
@@ -236,26 +275,37 @@ def find_or_create_navis_view(doc):
         t.Commit()
     return view, True
 
+
 def count_visible_elements(doc, view):
-    return (FilteredElementCollector(doc, view.Id)
-            .WhereElementIsNotElementType()
-            .GetElementCount())
+    return (
+        FilteredElementCollector(doc, view.Id)
+        .WhereElementIsNotElementType()
+        .GetElementCount()
+    )
+
 
 def export_view_to_nwc(doc, view, target_folder, file_wo_ext):
     """Экспорт указанного вида в .nwc. Возвращает (api_ok, out_path)."""
+    if not target_folder or not file_wo_ext:
+        return False, None
+
     if not os.path.exists(target_folder):
-        try: os.makedirs(target_folder)
-        except Exception: pass
+        try:
+            os.makedirs(target_folder)
+        except Exception:
+            return False, None
+
     opts = NavisworksExportOptions()
     opts.ExportScope = NavisworksExportScope.View
-    opts.ViewId      = view.Id
+    opts.ViewId = view.Id
     api_ok = False
     try:
         api_ok = doc.Export(target_folder, file_wo_ext, opts)
     except Exception:
         api_ok = False
     out_path = os.path.join(target_folder, file_wo_ext + ".nwc")
-    return api_ok, out_path
+        return api_ok, out_path
+
 
 def pick_models():
     try:
@@ -268,12 +318,16 @@ def pick_models():
             return list(models)
         except Exception:
             pass
-    models = forms.pick_file(files_filter="Revit files (*.rvt)|*.rvt",
-                             multi_file=True,
-                             title="Выберите Revit модели для экспорта")
+    models = forms.pick_file(
+        files_filter="Revit files (*.rvt)|*.rvt",
+        multi_file=True,
+        title="Выберите Revit модели для экспорта",
+    )
     return list(models) if models else []
 
+
 # ---------- main ----------
+
 
 def main():
     sel_models = pick_models()
@@ -294,7 +348,9 @@ def main():
         dest_folder = export_root  # <-- БЕЗ подпапки под модель
 
         out_file_expected = os.path.join(dest_folder, file_wo_ext + ".nwc")
-        out.print_md(":open_file_folder: **{}** → {}".format(model_name, out_file_expected))
+        out.print_md(
+            ":open_file_folder: **{}** → {}".format(model_name, out_file_expected)
+        )
 
         mp = to_model_path(user_path)
         if mp is None:
@@ -308,23 +364,25 @@ def main():
         # Функция-предикат для фильтрации рабочих наборов
         def workset_filter(ws_name):
             """Возвращает True, если рабочий набор нужно открыть"""
-            name = (ws_name or u"").strip()
+            name = (ws_name or "").strip()
             # Исключаем: начинающиеся с '00_'
-            if name.startswith(u'00_'):
+            if name.startswith("00_"):
                 return False
             # Исключаем: содержащие 'Link' или 'Связь' (регистронезависимо)
             name_lower = name.lower()
-            if u'link' in name_lower or u'связь' in name_lower:
+            if "link" in name_lower or "связь" in name_lower:
                 return False
             return True
 
         try:
             doc, failure_handler, dialog_suppressor = openbg.open_in_background(
-                __revit__.Application, __revit__, mp,
+                __revit__.Application,
+                __revit__,
+                mp,
                 audit=False,
-                worksets=('predicate', workset_filter),
+                worksets=("predicate", workset_filter),
                 detach=True,  # Отсоединить с сохранением рабочих наборов
-                suppress_dialogs=True  # Подавлять диалоговые окна (TaskDialog)
+                suppress_dialogs=True,  # Подавлять диалоговые окна (TaskDialog)
             )
         except Exception as e:
             out.print_md(":x: Ошибка открытия: `{}`".format(e))
@@ -336,24 +394,30 @@ def main():
         if failure_handler is not None:
             try:
                 summary = failure_handler.get_summary()
-                total_w = summary.get('total_warnings', 0)
-                total_e = summary.get('total_errors', 0)
+                total_w = summary.get("total_warnings", 0)
+                total_e = summary.get("total_errors", 0)
                 if total_w > 0 or total_e > 0:
-                    out.print_md(u":warning: При открытии обработано автоматически: **{} предупреждений, {} ошибок**".format(total_w, total_e))
+                    out.print_md(
+                        ":warning: При открытии обработано автоматически: **{} предупреждений, {} ошибок**".format(
+                            total_w, total_e
+                        )
+                    )
                     # Вывод первых 5 предупреждений
                     if total_w > 0:
-                        warnings = summary.get('warnings', [])
+                        warnings = summary.get("warnings", [])
                         for idx, w in enumerate(warnings[:5], 1):
-                            out.print_md(u"  {}. {}".format(idx, w))
+                            out.print_md("  {}. {}".format(idx, w))
                         if total_w > 5:
-                            out.print_md(u"  ... и ещё {} предупреждений".format(total_w - 5))
+                            out.print_md(
+                                "  ... и ещё {} предупреждений".format(total_w - 5)
+                            )
                     # Вывод первых 3 ошибок
                     if total_e > 0:
-                        errors = summary.get('errors', [])
+                        errors = summary.get("errors", [])
                         for idx, err in enumerate(errors[:3], 1):
-                            out.print_md(u"  Ошибка {}: {}".format(idx, err))
+                            out.print_md("  Ошибка {}: {}".format(idx, err))
                         if total_e > 3:
-                            out.print_md(u"  ... и ещё {} ошибок".format(total_e - 3))
+                            out.print_md("  ... и ещё {} ошибок".format(total_e - 3))
             except Exception:
                 pass
 
@@ -364,10 +428,14 @@ def main():
             out.print_md(":x: Ошибка подготовки вида 'Navisworks': `{}`".format(e))
             # Отключаем подавитель диалогов
             if dialog_suppressor is not None:
-                try: dialog_suppressor.detach()
-                except Exception: pass
-            try: closebg.close_with_policy(doc, do_sync=False, save_if_not_ws=False)
-            except Exception: pass
+                try:
+                    dialog_suppressor.detach()
+                except Exception:
+                    pass
+            try:
+                closebg.close_with_policy(doc, do_sync=False, save_if_not_ws=False)
+            except Exception:
+                pass
             out.update_progress(i + 1, len(sel_models))
             continue
 
@@ -377,19 +445,27 @@ def main():
             pass
 
         try:
-            out.print_md(u"- Импортированные категории скрыты: **{}**".format(view.AreImportCategoriesHidden))
+            out.print_md(
+                "- Импортированные категории скрыты: **{}**".format(
+                    view.AreImportCategoriesHidden
+                )
+            )
         except Exception:
             pass
         try:
-            imp_count = (FilteredElementCollector(doc, view.Id)
-                         .OfClass(ImportInstance)
-                         .GetElementCount())
-            out.print_md(u"- ImportInstance в виде: **{}**".format(imp_count))
+            imp_count = (
+                FilteredElementCollector(doc, view.Id)
+                .OfClass(ImportInstance)
+                .GetElementCount()
+            )
+            out.print_md("- ImportInstance в виде: **{}**".format(imp_count))
         except Exception:
             pass
 
-        vis_count  = count_visible_elements(doc, view)
-        out.print_md(u"На виде **{}** видно элементов: **{}**".format(view.Name, vis_count))
+        vis_count = count_visible_elements(doc, view)
+        out.print_md(
+            "На виде **{}** видно элементов: **{}**".format(view.Name, vis_count)
+        )
 
         # Экспорт (в корень, без подпапки)
         t_exp = coreutils.Timer()
@@ -397,7 +473,9 @@ def main():
         err_text = None
         try:
             if vis_count > 0:
-                api_ok, out_path = export_view_to_nwc(doc, view, dest_folder, file_wo_ext)
+                api_ok, out_path = export_view_to_nwc(
+                    doc, view, dest_folder, file_wo_ext
+                )
             else:
                 err_text = "Вид не имеет элементов."
         except Exception as e:
@@ -408,9 +486,11 @@ def main():
         exp_s = str(datetime.timedelta(seconds=int(t_exp.get_time())))
 
         if file_ok and not api_ok and err_text is None:
-            out.print_md(u":warning: API вернул False, но файл существует: `{}` ({} байт)".format(
-                out_path, os.path.getsize(out_path)
-            ))
+            out.print_md(
+                ":warning: API вернул False, но файл существует: `{}` ({} байт)".format(
+                    out_path, os.path.getsize(out_path)
+                )
+            )
 
         # Закрытие
         try:
@@ -422,15 +502,21 @@ def main():
         if dialog_suppressor is not None:
             try:
                 dialog_summary = dialog_suppressor.get_summary()
-                total_dialogs = dialog_summary.get('total_dialogs', 0)
+                total_dialogs = dialog_summary.get("total_dialogs", 0)
                 if total_dialogs > 0:
-                    out.print_md(u":speech_balloon: Автоматически закрыто диалогов: **{}**".format(total_dialogs))
-                    dialogs = dialog_summary.get('dialogs', [])
+                    out.print_md(
+                        ":speech_balloon: Автоматически закрыто диалогов: **{}**".format(
+                            total_dialogs
+                        )
+                    )
+                    dialogs = dialog_summary.get("dialogs", [])
                     for idx, d in enumerate(dialogs[:5], 1):
-                        dialog_id = d.get('dialog_id', 'Unknown')
-                        out.print_md(u"  {}. {}".format(idx, dialog_id))
+                        dialog_id = d.get("dialog_id", "Unknown")
+                        out.print_md("  {}. {}".format(idx, dialog_id))
                     if total_dialogs > 5:
-                        out.print_md(u"  ... и ещё {} диалогов".format(total_dialogs - 5))
+                        out.print_md(
+                            "  ... и ещё {} диалогов".format(total_dialogs - 5)
+                        )
             except Exception:
                 pass
             try:
@@ -438,10 +524,16 @@ def main():
             except Exception:
                 pass
 
-        outcome = u":white_check_mark: OK" if ok else (u":x: Ошибка — {}".format(err_text) if err_text else u":x: Ошибка")
-        out.print_md(u"- Открытие: **{}**, Экспорт: **{}** → {}".format(open_s, exp_s, outcome))
+        outcome = (
+            ":white_check_mark: OK"
+            if ok
+            else (":x: Ошибка — {}".format(err_text) if err_text else ":x: Ошибка")
+        )
+        out.print_md(
+            "- Открытие: **{}**, Экспорт: **{}** → {}".format(open_s, exp_s, outcome)
+        )
         if ok:
-            out.print_md(u"Готово: `{}`".format(out_path))
+            out.print_md("Готово: `{}`".format(out_path))
         out.print_md("___")
 
         out.update_progress(i + 1, len(sel_models))

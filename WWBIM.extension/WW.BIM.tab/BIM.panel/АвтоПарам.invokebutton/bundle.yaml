@@ -1,0 +1,11 @@
+title: 
+  ru: "AHU"
+  en_us: "AHU"
+tooltip: 
+  ru: "В разработке"
+  en_us: "In development"
+author: "Vlad"
+context: doc-project
+assembly: AutoFullParam.dll
+command: AutoFullParam.ExternalCommand
+
